@@ -1082,9 +1082,13 @@ namespace buildgl
         bool frameActive = false;
         bool opaqueDrawn = false;
         bool maskedDrawn = false;
-        std::array<GLuint, MAXTILES> tex{};
-        std::array<unsigned char, MAXTILES> texReady{};
-        std::array<unsigned char, MAXTILES> texDirty{};
+        // Textures are cached per BUILD lookup palette. A tile's source ART
+        // data is still loaded once, but palette remaps such as access-card
+        // colors, enemy variants, sector tints, and HUD palettes need distinct
+        // GL textures because this fixed-function path uploads true RGBA.
+        std::array<std::array<GLuint, MAXPALOOKUPS>, MAXTILES> tex{};
+        std::array<std::array<unsigned char, MAXPALOOKUPS>, MAXTILES> texReady{};
+        std::array<std::array<unsigned char, MAXPALOOKUPS>, MAXTILES> texDirty{};
         std::vector<unsigned char> tileData[MAXTILES];
     } g;
 
@@ -1514,6 +1518,57 @@ namespace buildgl
         return std::string(buf);
     }
 
+    static void markTileDirty(short tilenum)
+    {
+        if ((unsigned short)tilenum >= MAXTILES) return;
+        for (int pal = 0; pal < MAXPALOOKUPS; ++pal)
+            g.texDirty[tilenum][pal] = 1;
+    }
+
+    static void markPaletteDirty(long palnum)
+    {
+        if (palnum < 0 || palnum >= MAXPALOOKUPS)
+        {
+            for (short tile = 0; tile < MAXTILES; ++tile)
+                markTileDirty(tile);
+            return;
+        }
+
+        for (int tile = 0; tile < MAXTILES; ++tile)
+            g.texDirty[tile][palnum] = 1;
+    }
+
+    static void markAllTexturesDirty()
+    {
+        for (short tile = 0; tile < MAXTILES; ++tile)
+            markTileDirty(tile);
+    }
+
+    static unsigned char remapPaletteIndex(unsigned char idx, unsigned char palnum)
+    {
+        if (idx == 255) return idx;
+
+        const int palSlot = static_cast<int>(palnum);
+        const char* lookup = nullptr;
+        if (palSlot >= 0 && palSlot < MAXPALOOKUPS && palookup[palSlot])
+            lookup = palookup[palSlot];
+        else if (palookup[0])
+            lookup = palookup[0];
+
+        // palookup[p] is a numpalookups*256 shade table. Row 0 contains the
+        // actual lookup-palette color remap; lighting still comes from
+        // glColorShade() and fog in this GL shim.
+        if (lookup)
+            return static_cast<unsigned char>(lookup[idx]);
+        return idx;
+    }
+
+    static bool tileHasArt(short tilenum)
+    {
+        return (unsigned short)tilenum < MAXTILES &&
+            tilesizx[tilenum] > 0 && tilesizy[tilenum] > 0;
+    }
+
     static void ensureFallbackTile(short tilenum)
     {
         if (tilenum < 0 || tilenum >= MAXTILES) return;
@@ -1525,14 +1580,16 @@ namespace buildgl
                 g.tileData[tilenum][x * 64 + y] = static_cast<unsigned char>(((x >> 3) ^ (y >> 3)) & 1 ? 180 : 96);
         waloff[tilenum] = BUILDGL_PTR_TO_LONG(g.tileData[tilenum].data());
         picsiz[tilenum] = (6 | (6 << 4));
-        g.texDirty[tilenum] = 1;
+        markTileDirty(tilenum);
     }
 
-    static void uploadTexture(short tilenum)
+    static void uploadTexture(short tilenum, unsigned char palnum)
     {
         if (tilenum < 0 || tilenum >= MAXTILES) tilenum = 0;
+        const int palSlot = static_cast<int>(palnum) & (MAXPALOOKUPS - 1);
+
         if (!waloff[tilenum]) ensureFallbackTile(tilenum);
-        if (g.texReady[tilenum] && !g.texDirty[tilenum]) return;
+        if (g.texReady[tilenum][palSlot] && !g.texDirty[tilenum][palSlot]) return;
 
         const int w = max(1L, tilesizx[tilenum]);
         const int h = max(1L, tilesizy[tilenum]);
@@ -1551,48 +1608,52 @@ namespace buildgl
                 }
                 else
                 {
-                    d[0] = static_cast<unsigned char>(palette[idx * 3 + 0] << 2);
-                    d[1] = static_cast<unsigned char>(palette[idx * 3 + 1] << 2);
-                    d[2] = static_cast<unsigned char>(palette[idx * 3 + 2] << 2);
+                    idx = remapPaletteIndex(idx, static_cast<unsigned char>(palSlot));
+                    d[0] = static_cast<unsigned char>(static_cast<unsigned char>(palette[idx * 3 + 0]) << 2);
+                    d[1] = static_cast<unsigned char>(static_cast<unsigned char>(palette[idx * 3 + 1]) << 2);
+                    d[2] = static_cast<unsigned char>(static_cast<unsigned char>(palette[idx * 3 + 2]) << 2);
                     d[3] = 255;
                 }
             }
         }
 
-        if (!g.texReady[tilenum])
+        if (!g.texReady[tilenum][palSlot])
         {
-            glGenTextures(1, &g.tex[tilenum]);
-            g.texReady[tilenum] = 1;
+            glGenTextures(1, &g.tex[tilenum][palSlot]);
+            g.texReady[tilenum][palSlot] = 1;
         }
-        glBindTexture(GL_TEXTURE_2D, g.tex[tilenum]);
+        glBindTexture(GL_TEXTURE_2D, g.tex[tilenum][palSlot]);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba.data());
-        g.texDirty[tilenum] = 0;
+        g.texDirty[tilenum][palSlot] = 0;
+    }
+
+    static void bindTilePal(short tilenum, unsigned char palnum)
+    {
+        if (tilenum < 0 || tilenum >= MAXTILES) tilenum = 0;
+        const int palSlot = static_cast<int>(palnum) & (MAXPALOOKUPS - 1);
+        if (!waloff[tilenum]) loadtile(tilenum);
+        if (!waloff[tilenum]) ensureFallbackTile(tilenum);
+        uploadTexture(tilenum, static_cast<unsigned char>(palSlot));
+        glBindTexture(GL_TEXTURE_2D, g.tex[tilenum][palSlot]);
     }
 
     static void bindTile(short tilenum)
     {
-        if (tilenum < 0 || tilenum >= MAXTILES) tilenum = 0;
-        if (!waloff[tilenum]) loadtile(tilenum);
-        if (!waloff[tilenum]) ensureFallbackTile(tilenum);
-        uploadTexture(tilenum);
-        glBindTexture(GL_TEXTURE_2D, g.tex[tilenum]);
+        bindTilePal(tilenum, 0);
     }
 
-    static void texFloor(short tilenum, const sectortype& sec, bool ceiling, long x, long y)
+    static void calcFloorTex(short tilenum, const sectortype& sec, bool ceiling, long x, long y, float& u, float& v)
     {
         const float tw = static_cast<float>(max(1L, tilesizx[tilenum]));
         const float th = static_cast<float>(max(1L, tilesizy[tilenum]));
         const short stat = ceiling ? sec.ceilingstat : sec.floorstat;
 
         // BUILD floors/ceilings use roughly one texture pixel per 16 map units
-        // by default. Bit 3 ("double smooshiness") doubles that texel rate.
-        // The previous GL path divided world coordinates by 1024 before the
-        // tile size divide, making floor and ceiling textures about 64x too
-        // large on common 64x64 tiles.
+        // by default. Bit 3 ("E" / texture expansion) doubles that texel rate.
         const float mapToTexel = (stat & 8) ? (1.0f / 8.0f) : (1.0f / 16.0f);
 
         float uPix = 0.0f;
@@ -1612,7 +1673,10 @@ namespace buildgl
                 const double rx = static_cast<double>(x - w0.x);
                 const double ry = static_cast<double>(y - w0.y);
 
-                // Rotate the texture frame so X follows the sector's first wall.
+                // Relative floor/ceiling alignment follows the sector's first
+                // wall. This is critical for nested sectors such as bins,
+                // ledges, and moving platforms whose flats should not inherit
+                // nearby wall-looking coordinates.
                 uPix = static_cast<float>((rx * dx + ry * dy) / len) * mapToTexel;
                 vPix = static_cast<float>((ry * dx - rx * dy) / len) * mapToTexel;
             }
@@ -1620,7 +1684,6 @@ namespace buildgl
         else
         {
             uPix = static_cast<float>(x) * mapToTexel;
-            // Classic ceiling setup uses the opposite Y sign from floors.
             vPix = static_cast<float>(ceiling ? -y : y) * mapToTexel;
         }
 
@@ -1631,13 +1694,75 @@ namespace buildgl
         uPix += static_cast<float>(ceiling ? sec.ceilingxpanning : sec.floorxpanning);
         vPix += static_cast<float>(ceiling ? sec.ceilingypanning : sec.floorypanning);
 
-        glTexCoord2f(uPix / tw, vPix / th);
+        u = uPix / tw;
+        v = vPix / th;
+    }
+
+    static void texFloor(short tilenum, const sectortype& sec, bool ceiling, long x, long y)
+    {
+        float u = 0.0f, v = 0.0f;
+        calcFloorTex(tilenum, sec, ceiling, x, y, u, v);
+        glTexCoord2f(u, v);
     }
 
     static void vertexBuild(long x, long y, long z)
     {
         Vec3 v = buildToGl(x, y, z);
         glVertex3f(v.x, v.y, v.z);
+    }
+
+    struct FlatTessVertex
+    {
+        GLdouble pos[3] = {};
+        GLfloat uv[2] = {};
+    };
+
+    struct FlatTessContext
+    {
+        std::vector<std::unique_ptr<FlatTessVertex>> owned;
+    };
+
+    static FlatTessContext* g_flatTessContext = nullptr;
+
+    static void CALLBACK flatTessBeginCB(GLenum type)
+    {
+        glBegin(type);
+    }
+
+    static void CALLBACK flatTessEndCB()
+    {
+        glEnd();
+    }
+
+    static void CALLBACK flatTessVertexCB(void* data)
+    {
+        const FlatTessVertex* v = static_cast<const FlatTessVertex*>(data);
+        if (!v) return;
+        glTexCoord2f(v->uv[0], v->uv[1]);
+        glVertex3dv(v->pos);
+    }
+
+    static void CALLBACK flatTessCombineCB(GLdouble coords[3], void* vertexData[4], GLfloat weight[4], void** outData)
+    {
+        if (!g_flatTessContext || !outData) return;
+
+        std::unique_ptr<FlatTessVertex> v(new FlatTessVertex());
+        v->pos[0] = coords[0];
+        v->pos[1] = coords[1];
+        v->pos[2] = coords[2];
+        v->uv[0] = 0.0f;
+        v->uv[1] = 0.0f;
+
+        for (int i = 0; i < 4; ++i)
+        {
+            const FlatTessVertex* in = static_cast<const FlatTessVertex*>(vertexData[i]);
+            if (!in) continue;
+            v->uv[0] += in->uv[0] * weight[i];
+            v->uv[1] += in->uv[1] * weight[i];
+        }
+
+        *outData = v.get();
+        g_flatTessContext->owned.push_back(std::move(v));
     }
 
     struct SkySelection
@@ -1797,7 +1922,7 @@ namespace buildgl
         const int tileCount = 1 << skyBits;
 
         short firstPic = parallaxSkyTile(sky, 0);
-        bindTile(firstPic);
+        bindTilePal(firstPic, static_cast<unsigned char>(sky.pal));
         const float firstTileW = static_cast<float>(max(1L, tilesizx[firstPic]));
         const float firstTileH = static_cast<float>(max(1L, tilesizy[firstPic]));
 
@@ -1834,7 +1959,7 @@ namespace buildgl
             short pic = parallaxSkyTile(sky, tileSlot);
             if (pic != boundSkyPic)
             {
-                bindTile(pic);
+                bindTilePal(pic, static_cast<unsigned char>(sky.pal));
                 boundSkyPic = pic;
             }
 
@@ -1874,7 +1999,7 @@ namespace buildgl
         for (int t = 0; t < tileCount; ++t)
         {
             short pic = parallaxSkyTile(sky, t);
-            bindTile(pic);
+            bindTilePal(pic, static_cast<unsigned char>(sky.pal));
 
             glBegin(GL_QUADS);
             for (int s = 0; s < segmentsPerTile; ++s)
@@ -1911,45 +2036,102 @@ namespace buildgl
         const short stat = ceiling ? sec.ceilingstat : sec.floorstat;
         if (stat & 1) return; // Parallaxed sky is drawn once as an infinite backdrop.
         applySectorFog(sectnum);
+
         short pic = ceiling ? sec.ceilingpicnum : sec.floorpicnum;
         if ((unsigned short)pic >= MAXTILES) pic = 0;
         if (picanm[pic] & 192) pic = static_cast<short>(pic + animateoffs(pic, sectnum));
-        bindTile(pic);
+        if ((unsigned short)pic >= MAXTILES) pic = 0;
+
+        const unsigned char palnum = static_cast<unsigned char>(ceiling ? sec.ceilingpal : sec.floorpal);
+        bindTilePal(pic, palnum);
         glDisable(GL_ALPHA_TEST);
         glDisable(GL_BLEND);
         glDepthMask(GL_TRUE);
         glColorShade((ceiling ? sec.ceilingshade : sec.floorshade));
 
         auto loops = collectLoops(sectnum);
+        if (loops.empty()) return;
+
+        GLUtesselator* tess = gluNewTess();
+        if (!tess)
+        {
+            // Conservative fallback: keep the old per-loop ear clipping if GLU
+            // tessellation is not available. The normal path below is what fixes
+            // nested-loop sectors/holes such as trash bins and counters.
+            for (const auto& loop : loops)
+            {
+                std::vector<Vec2> pts;
+                pts.reserve(loop.size());
+                for (int wi : loop) pts.push_back(Vec2{ static_cast<double>(wall[wi].x), static_cast<double>(wall[wi].y) });
+                std::vector<int> tris = triangulate(pts);
+                if (tris.empty())
+                {
+                    for (int i = 1; i + 1 < static_cast<int>(pts.size()); ++i)
+                    {
+                        tris.push_back(0); tris.push_back(i); tris.push_back(i + 1);
+                    }
+                }
+
+                glBegin(GL_TRIANGLES);
+                for (size_t i = 0; i + 2 < tris.size(); i += 3)
+                {
+                    int order[3] = { tris[i], tris[i + (ceiling ? 2 : 1)], tris[i + (ceiling ? 1 : 2)] };
+                    for (int k = 0; k < 3; ++k)
+                    {
+                        int pi = order[k];
+                        long x = static_cast<long>(std::llround(pts[pi].x));
+                        long y = static_cast<long>(std::llround(pts[pi].y));
+                        texFloor(pic, sec, ceiling, x, y);
+                        vertexBuild(x, y, slopeZ(sectnum, x, y, ceiling));
+                    }
+                }
+                glEnd();
+            }
+            return;
+        }
+
+        FlatTessContext ctx;
+        ctx.owned.reserve(256);
+        g_flatTessContext = &ctx;
+
+        gluTessProperty(tess, GLU_TESS_WINDING_RULE, GLU_TESS_WINDING_ODD);
+        // Project tessellation onto the map footprint (X/Z in GL space). BUILD
+        // slopes are still represented in vertex Y after tessellation.
+        gluTessNormal(tess, 0.0, 1.0, 0.0);
+        gluTessCallback(tess, GLU_TESS_BEGIN, reinterpret_cast<void (CALLBACK*)()>(flatTessBeginCB));
+        gluTessCallback(tess, GLU_TESS_VERTEX, reinterpret_cast<void (CALLBACK*)()>(flatTessVertexCB));
+        gluTessCallback(tess, GLU_TESS_END, reinterpret_cast<void (CALLBACK*)()>(flatTessEndCB));
+        gluTessCallback(tess, GLU_TESS_COMBINE, reinterpret_cast<void (CALLBACK*)()>(flatTessCombineCB));
+
+        gluTessBeginPolygon(tess, nullptr);
         for (const auto& loop : loops)
         {
-            std::vector<Vec2> pts;
-            pts.reserve(loop.size());
-            for (int wi : loop) pts.push_back(Vec2{ static_cast<double>(wall[wi].x), static_cast<double>(wall[wi].y) });
-            std::vector<int> tris = triangulate(pts);
-            if (tris.empty())
+            if (loop.size() < 3) continue;
+            gluTessBeginContour(tess);
+            for (int wi : loop)
             {
-                for (int i = 1; i + 1 < static_cast<int>(pts.size()); ++i)
-                {
-                    tris.push_back(0); tris.push_back(i); tris.push_back(i + 1);
-                }
-            }
+                if (wi < 0 || wi >= numwalls) continue;
+                const long x = wall[wi].x;
+                const long y = wall[wi].y;
+                const long z = slopeZ(sectnum, x, y, ceiling);
+                const Vec3 gv = buildToGl(x, y, z);
 
-            glBegin(GL_TRIANGLES);
-            for (size_t i = 0; i + 2 < tris.size(); i += 3)
-            {
-                int order[3] = { tris[i], tris[i + (ceiling ? 2 : 1)], tris[i + (ceiling ? 1 : 2)] };
-                for (int k = 0; k < 3; ++k)
-                {
-                    int pi = order[k];
-                    long x = static_cast<long>(std::llround(pts[pi].x));
-                    long y = static_cast<long>(std::llround(pts[pi].y));
-                    texFloor(pic, sec, ceiling, x, y);
-                    vertexBuild(x, y, slopeZ(sectnum, x, y, ceiling));
-                }
+                std::unique_ptr<FlatTessVertex> tv(new FlatTessVertex());
+                tv->pos[0] = static_cast<GLdouble>(gv.x);
+                tv->pos[1] = static_cast<GLdouble>(gv.y);
+                tv->pos[2] = static_cast<GLdouble>(gv.z);
+                calcFloorTex(pic, sec, ceiling, x, y, tv->uv[0], tv->uv[1]);
+
+                FlatTessVertex* raw = tv.get();
+                ctx.owned.push_back(std::move(tv));
+                gluTessVertex(tess, raw->pos, raw);
             }
-            glEnd();
+            gluTessEndContour(tess);
         }
+        gluTessEndPolygon(tess);
+
+        g_flatTessContext = nullptr;
+        gluDeleteTess(tess);
     }
 
     static void texWall(short tilenum, float uPix, float vPix)
@@ -1961,7 +2143,7 @@ namespace buildgl
 
     static void drawWallSpan(const walltype& w, long x1, long y1, long x2, long y2,
         long zTop1, long zTop2, long zBot1, long zBot2,
-        short pic, long shade, bool transparent,
+        short pic, unsigned char palnum, long shade, bool transparent,
         long refTop1, long refTop2, long refBot1, long refBot2)
     {
         if (zBot1 <= zTop1 && zBot2 <= zTop2) return;
@@ -1984,9 +2166,12 @@ namespace buildgl
             pic = 0;
         }
 
-        bindTile(pic);
+        bindTilePal(pic, palnum);
 
-        const bool maskedPass = transparent;
+        // cstat 16 is a true masked/cutout wall: palette index 255 is
+        // transparent. cstat 32 by itself is a one-way wall that uses
+        // overpicnum too, but it is solid: index 255 should draw black.
+        const bool maskedPass = transparent && ((w.cstat & 16) != 0);
         const bool translucent = maskedPass && ((w.cstat & 128) != 0);
 
         if (maskedPass)
@@ -2148,11 +2333,175 @@ namespace buildgl
         return sectnum >= 0 && sectnum < numsectors && (sector[sectnum].floorstat & 1) != 0;
     }
 
+    static short ownerSectorOfWall(int wallnum)
+    {
+        if (wallnum < 0 || wallnum >= numwalls) return -1;
+        for (short si = 0; si < numsectors; ++si)
+        {
+            const int start = sector[si].wallptr;
+            const int end = start + sector[si].wallnum;
+            if (wallnum >= start && wallnum < end)
+                return si;
+        }
+        return -1;
+    }
+
+    static bool validMaskedPic(short pic)
+    {
+        return tileHasArt(pic);
+    }
+
+#ifndef BUILDGL_CULL_ONE_WAY_MASKED_BACKFACES
+#define BUILDGL_CULL_ONE_WAY_MASKED_BACKFACES 0
+#endif
+
+    static void renderSingleMaskedWall(int drawWi, short drawSect)
+    {
+        if (drawWi < 0 || drawWi >= numwalls) return;
+        if (drawSect < 0 || drawSect >= numsectors) drawSect = ownerSectorOfWall(drawWi);
+        if (drawSect < 0 || drawSect >= numsectors) return;
+        if (!sectorScanned(drawSect)) return;
+
+        walltype& mw = wall[drawWi];
+        if ((mw.cstat & 48) == 0) return;
+        if (mw.point2 < 0 || mw.point2 >= numwalls) return;
+        if (mw.nextsector < 0 || mw.nextsector >= numsectors) return;
+
+        // Bit 32 by itself is a one-way overpicnum wall. Keep backface culling
+        // configurable; default to drawing it because missing one-way/masked
+        // walls are more damaging in this GL shim than an occasional visible
+        // backside.
+#if BUILDGL_CULL_ONE_WAY_MASKED_BACKFACES
+        if ((mw.cstat & 32) && !cameraOnWallSectorSide(drawWi, drawSect))
+            return;
+#endif
+
+        walltype& mw2 = wall[mw.point2];
+        const short nextSect = mw.nextsector;
+
+        const long c1 = slopeZ(drawSect, mw.x, mw.y, true);
+        const long c2 = slopeZ(drawSect, mw2.x, mw2.y, true);
+        const long f1 = slopeZ(drawSect, mw.x, mw.y, false);
+        const long f2 = slopeZ(drawSect, mw2.x, mw2.y, false);
+        const long nc1 = slopeZ(nextSect, mw.x, mw.y, true);
+        const long nc2 = slopeZ(nextSect, mw2.x, mw2.y, true);
+        const long nf1 = slopeZ(nextSect, mw.x, mw.y, false);
+        const long nf2 = slopeZ(nextSect, mw2.x, mw2.y, false);
+
+        const long top1 = max(c1, nc1);
+        const long top2 = max(c2, nc2);
+        const long bot1 = min(f1, nf1);
+        const long bot2 = min(f2, nf2);
+        if (bot1 <= top1 && bot2 <= top2) return;
+
+        short maskPic = mw.overpicnum;
+        unsigned char maskPal = static_cast<unsigned char>(mw.pal);
+
+        if (mw.nextwall >= 0 && mw.nextwall < numwalls)
+        {
+            const walltype& other = wall[mw.nextwall];
+            if ((other.cstat & 48) && validMaskedPic(other.overpicnum) &&
+                (!validMaskedPic(maskPic) || (maskPic == 0 && other.overpicnum != 0)))
+            {
+                maskPic = other.overpicnum;
+                maskPal = static_cast<unsigned char>(other.pal);
+            }
+        }
+
+        if (!validMaskedPic(maskPic))
+            return;
+
+        applySectorFog(drawSect);
+        const long maskShade = static_cast<long>(sector[drawSect].floorshade) + static_cast<long>(mw.shade);
+
+        drawWallSpan(mw, mw.x, mw.y, mw2.x, mw2.y,
+            top1, top2, bot1, bot2,
+            maskPic, maskPal, maskShade, true,
+            c1, c2, f1, f2);
+    }
+
+    static void renderMaskedWalls()
+    {
+        std::vector<unsigned char> done(static_cast<size_t>(max<long>(numwalls, 0L)), 0);
+
+        auto considerWall = [&](int wi)
+            {
+                if (wi < 0 || wi >= numwalls) return;
+                if (!done.empty() && done[static_cast<size_t>(wi)]) return;
+
+                walltype& w = wall[wi];
+                if ((w.cstat & 48) == 0) return;
+                if (w.nextsector < 0 || w.nextsector >= numsectors) return;
+
+                short sect = ownerSectorOfWall(wi);
+                if (sect < 0 || sect >= numsectors || !sectorScanned(sect)) return;
+
+                int drawWi = wi;
+                short drawSect = sect;
+
+                const bool pairedMasked = (w.nextwall >= 0 && w.nextwall < numwalls &&
+                    (wall[w.nextwall].cstat & 48) != 0);
+
+                if (pairedMasked)
+                {
+                    if (!done.empty())
+                    {
+                        done[static_cast<size_t>(wi)] = 1;
+                        done[static_cast<size_t>(w.nextwall)] = 1;
+                    }
+
+                    const short otherSect = ownerSectorOfWall(w.nextwall);
+                    const bool thisSide = cameraOnWallSectorSide(wi, sect);
+                    const bool otherSide = cameraOnWallSectorSide(w.nextwall, otherSect);
+
+                    if (!thisSide && otherSide)
+                    {
+                        drawWi = w.nextwall;
+                        drawSect = otherSect;
+                    }
+                    else if (thisSide == otherSide && w.nextwall < wi)
+                    {
+                        // Degenerate/on-line camera case: draw one copy only.
+                        drawWi = w.nextwall;
+                        drawSect = otherSect;
+                    }
+                }
+                else if (!done.empty())
+                {
+                    done[static_cast<size_t>(wi)] = 1;
+                }
+
+                renderSingleMaskedWall(drawWi, drawSect);
+            };
+
+        if (maskwallcnt > 0)
+        {
+            for (long i = 0; i < maskwallcnt; ++i)
+                considerWall(maskwall[i]);
+        }
+        else
+        {
+            // Compatibility for direct maskwallscan()/drawmaskwall() calls made
+            // outside drawrooms(), before scansector() populated maskwall[].
+            for (short si = 0; si < numsectors; ++si)
+            {
+                if (!sectorScanned(si)) continue;
+                const int start = sector[si].wallptr;
+                const int end = start + sector[si].wallnum;
+                for (int wi = start; wi < end && wi < numwalls; ++wi)
+                    considerWall(wi);
+            }
+        }
+    }
+
     static void renderWalls(bool transparent)
     {
-        std::vector<unsigned char> maskedDone;
         if (transparent)
-            maskedDone.assign(static_cast<size_t>(max<long>(numwalls, 0L)), 0);
+        {
+            renderMaskedWalls();
+            return;
+        }
+
 
         for (short si = 0; si < numsectors; ++si)
         {
@@ -2173,93 +2522,18 @@ namespace buildgl
                 walltype& w2 = wall[w.point2];
 
                 const bool hasNext = (w.nextsector >= 0 && w.nextsector < numsectors);
-                const bool masked = hasNext && ((w.cstat & 16) != 0);
-
-                if (transparent)
-                {
-                    if (!masked) continue;
-                    if (!maskedDone.empty() && maskedDone[static_cast<size_t>(wi)]) continue;
-
-                    const bool pairedMasked = (w.nextwall >= 0 && w.nextwall < numwalls &&
-                        (wall[w.nextwall].cstat & 16) != 0);
-
-                    if (!maskedDone.empty())
-                    {
-                        maskedDone[static_cast<size_t>(wi)] = 1;
-                        if (pairedMasked)
-                            maskedDone[static_cast<size_t>(w.nextwall)] = 1;
-                    }
-
-                    int drawWi = wi;
-                    short drawSect = si;
-
-                    // For a normal two-sided masked wall, draw exactly the side
-                    // facing the camera. Drawing both sides causes equal-depth
-                    // z fighting and often overwrites the correct overpicnum.
-                    if (pairedMasked && !cameraOnWallSectorSide(wi, si))
-                    {
-                        drawWi = w.nextwall;
-                        drawSect = w.nextsector;
-                    }
-
-                    walltype& mw = wall[drawWi];
-                    if ((mw.cstat & 16) == 0) continue;
-                    if (mw.point2 < 0 || mw.point2 >= numwalls) continue;
-                    if (mw.nextsector < 0 || mw.nextsector >= numsectors) continue;
-
-                    if ((mw.cstat & 32) && !cameraOnWallSectorSide(drawWi, drawSect))
-                        continue;
-
-                    walltype& mw2 = wall[mw.point2];
-                    const short nextSect = mw.nextsector;
-
-                    const long c1 = slopeZ(drawSect, mw.x, mw.y, true);
-                    const long c2 = slopeZ(drawSect, mw2.x, mw2.y, true);
-                    const long f1 = slopeZ(drawSect, mw.x, mw.y, false);
-                    const long f2 = slopeZ(drawSect, mw2.x, mw2.y, false);
-                    const long nc1 = slopeZ(nextSect, mw.x, mw.y, true);
-                    const long nc2 = slopeZ(nextSect, mw2.x, mw2.y, true);
-                    const long nf1 = slopeZ(nextSect, mw.x, mw.y, false);
-                    const long nf2 = slopeZ(nextSect, mw2.x, mw2.y, false);
-
-                    const long top1 = max(c1, nc1);
-                    const long top2 = max(c2, nc2);
-                    const long bot1 = min(f1, nf1);
-                    const long bot2 = min(f2, nf2);
-                    if (bot1 <= top1 && bot2 <= top2) continue;
-
-                    applySectorFog(drawSect);
-                    const long maskShade = static_cast<long>(sector[drawSect].floorshade) +
-                        static_cast<long>(mw.shade);
-
-                    short maskPic = mw.overpicnum;
-                    if ((unsigned short)maskPic >= MAXTILES && pairedMasked)
-                    {
-                        const int otherWi = (drawWi == wi) ? w.nextwall : wi;
-                        if (otherWi >= 0 && otherWi < numwalls &&
-                            (unsigned short)wall[otherWi].overpicnum < MAXTILES)
-                            maskPic = wall[otherWi].overpicnum;
-                    }
-
-                    drawWallSpan(mw, mw.x, mw.y, mw2.x, mw2.y,
-                        top1, top2, bot1, bot2,
-                        maskPic, maskShade, true,
-                        c1, c2, f1, f2);
-                    continue;
-                }
-
                 const long c1 = slopeZ(si, w.x, w.y, true);
                 const long c2 = slopeZ(si, w2.x, w2.y, true);
                 const long f1 = slopeZ(si, w.x, w.y, false);
                 const long f2 = slopeZ(si, w2.x, w2.y, false);
                 const long shade = static_cast<long>(sec.floorshade) + static_cast<long>(w.shade);
 
-                // A wall with no nextsector is a true solid wall. A portal wall
-                // with cstat bit 32 is a one-way masked wall, not a full-height
-                // opaque wall; drawing it here caused phantom walls.
+                // A wall with no nextsector is a true solid wall. Red-line
+                // cstat-32 one-way walls use overpicnum and are drawn in the
+                // masked/overlay pass, not as normal wall.picnum geometry here.
                 if (!hasNext)
                 {
-                    drawWallSpan(w, w.x, w.y, w2.x, w2.y, c1, c2, f1, f2, w.picnum, shade, false, c1, c2, f1, f2);
+                    drawWallSpan(w, w.x, w.y, w2.x, w2.y, c1, c2, f1, f2, w.picnum, static_cast<unsigned char>(w.pal), shade, false, c1, c2, f1, f2);
                     continue;
                 }
 
@@ -2278,14 +2552,18 @@ namespace buildgl
                 const bool skyFloorPortal = hasParallaxFloor(si) && hasParallaxFloor(n);
 
                 if (!skyCeilingPortal && (nc1 > c1 || nc2 > c2))
-                    drawWallSpan(w, w.x, w.y, w2.x, w2.y, c1, c2, nc1, nc2, w.picnum, shade, false, c1, c2, f1, f2);
+                    drawWallSpan(w, w.x, w.y, w2.x, w2.y, c1, c2, nc1, nc2, w.picnum, static_cast<unsigned char>(w.pal), shade, false, c1, c2, f1, f2);
 
                 if (!skyFloorPortal && (nf1 < f1 || nf2 < f2))
                 {
                     short bottomPic = w.picnum;
+                    unsigned char bottomPal = static_cast<unsigned char>(w.pal);
                     if ((w.cstat & 2) && w.nextwall >= 0 && w.nextwall < numwalls)
+                    {
                         bottomPic = wall[w.nextwall].picnum;
-                    drawWallSpan(w, w.x, w.y, w2.x, w2.y, nf1, nf2, f1, f2, bottomPic, shade, false, c1, c2, f1, f2);
+                        bottomPal = static_cast<unsigned char>(wall[w.nextwall].pal);
+                    }
+                    drawWallSpan(w, w.x, w.y, w2.x, w2.y, nf1, nf2, f1, f2, bottomPic, bottomPal, shade, false, c1, c2, f1, f2);
                 }
             }
         }
@@ -2369,7 +2647,7 @@ namespace buildgl
             if (picanm[pic] & 192)
                 pic = static_cast<short>(pic + animateoffs(pic, static_cast<short>(ownerForAnim + 32768)));
             if ((unsigned short)pic >= MAXTILES) pic = 0;
-            bindTile(pic);
+            bindTilePal(pic, static_cast<unsigned char>(s.pal));
 
             const float tw = static_cast<float>(max(1L, tilesizx[pic]));
             const float th = static_cast<float>(max(1L, tilesizy[pic]));
@@ -2645,7 +2923,7 @@ extern "C" void loadpalette()
         }
     }
 
-    for (int i = 0; i < MAXTILES; ++i) buildgl::g.texDirty[i] = 1;
+    buildgl::markAllTexturesDirty();
     paletteloaded = 1;
 }
 
@@ -2736,7 +3014,7 @@ extern "C" void loadtile(short tilenume)
 
     waloff[tilenume] = BUILDGL_PTR_TO_LONG(buildgl::g.tileData[tilenume].data());
     walock[tilenume] = 199;
-    buildgl::g.texDirty[tilenume] = 1;
+    buildgl::markTileDirty(tilenume);
 }
 
 extern "C" long allocatepermanenttile(short tilenume, long xsiz, long ysiz)
@@ -2751,7 +3029,7 @@ extern "C" long allocatepermanenttile(short tilenume, long xsiz, long ysiz)
     int px = 0; while ((1 << px) < xsiz && px < 15) ++px;
     int py = 0; while ((1 << py) < ysiz && py < 15) ++py;
     picsiz[tilenume] = static_cast<char>(px | (py << 4));
-    buildgl::g.texDirty[tilenume] = 1;
+    buildgl::markTileDirty(tilenume);
     return waloff[tilenume];
 }
 
@@ -2865,6 +3143,23 @@ extern "C" void initengine()
 
 extern "C" void uninitengine()
 {
+    if (buildgl::g.ready)
+        wglMakeCurrent(buildgl::g.hdc, buildgl::g.hglrc);
+
+    for (int i = 0; i < MAXTILES; ++i)
+    {
+        for (int pal = 0; pal < MAXPALOOKUPS; ++pal)
+        {
+            if (buildgl::g.texReady[i][pal])
+            {
+                GLuint t = buildgl::g.tex[i][pal];
+                glDeleteTextures(1, &t);
+                buildgl::g.texReady[i][pal] = 0;
+            }
+            buildgl::g.texDirty[i][pal] = 1;
+        }
+    }
+
     buildgl::destroy();
     for (int i = 0; i < MAXPALOOKUPS; ++i)
     {
@@ -2875,12 +3170,6 @@ extern "C" void uninitengine()
     {
         buildgl::g.tileData[i].clear();
         waloff[i] = 0;
-        if (buildgl::g.texReady[i])
-        {
-            GLuint t = buildgl::g.tex[i];
-            glDeleteTextures(1, &t);
-            buildgl::g.texReady[i] = 0;
-        }
     }
 }
 
@@ -2941,9 +3230,10 @@ extern "C" void scansector(short sectnum)
         for (int wi = start; wi < end && wi < numwalls; ++wi)
         {
             short ns = wall[wi].nextsector;
-            if (ns >= 0 && ns < numsectors && !(gotsector[ns >> 3] & pow2char[ns & 7]) && sectorbordercnt < 255)
+            if (ns >= 0 && ns < numsectors && ((wall[wi].cstat & 32) == 0) &&
+                !(gotsector[ns >> 3] & pow2char[ns & 7]) && sectorbordercnt < 255)
                 sectorborder[sectorbordercnt++] = ns;
-            if ((wall[wi].cstat & 16) && maskwallcnt < MAXWALLSB)
+            if ((wall[wi].cstat & 48) && maskwallcnt < MAXWALLSB)
                 maskwall[maskwallcnt++] = static_cast<short>(wi);
         }
     }
@@ -4631,10 +4921,10 @@ extern "C" void rotatesprite(long sx, long sy, long z, short a, short picnum, si
 
 extern "C" void dorotatesprite(long sx, long sy, long z, short a, short picnum, signed char dashade, char dapalnum, char dastat, long cx1, long cy1, long cx2, long cy2)
 {
-    (void)dapalnum;
     if ((unsigned short)picnum >= MAXTILES || z <= 0) return;
     if (picanm[picnum] & 192) picnum = static_cast<short>(picnum + animateoffs(picnum, static_cast<short>(0xc000)));
-    buildgl::bindTile(picnum);
+    if ((unsigned short)picnum >= MAXTILES) picnum = 0;
+    buildgl::bindTilePal(picnum, static_cast<unsigned char>(dapalnum));
 
     float x = static_cast<float>(sx) / 65536.0f;
     float y = static_cast<float>(sy) / 65536.0f;
@@ -4818,7 +5108,7 @@ extern "C" void copytilepiece(long tilenume1, long sx1, long sy1, long xsiz, lon
                 if (v != 255) dst[bx * ys2 + by] = v;
             }
         }
-    buildgl::g.texDirty[tilenume2] = 1;
+    buildgl::markTileDirty(static_cast<short>(tilenume2));
 }
 
 extern "C" void squarerotatetile(short tilenume)
@@ -4832,7 +5122,7 @@ extern "C" void squarerotatetile(short tilenume)
         for (long y = 0; y < ys; ++y)
             tmp[(xs - 1 - y) * ys + x] = p[x * ys + y];
     std::memcpy(p, tmp.data(), tmp.size());
-    buildgl::g.texDirty[tilenume] = 1;
+    buildgl::markTileDirty(tilenume);
 }
 
 extern "C" int getclosestcol(long r, long g, long b)
@@ -4858,14 +5148,15 @@ extern "C" void makepalookup(long palnum, char* remapbuf, signed char r, signed 
     if (!remapbuf || dastat == 0)
     {
         if (palookup[0]) std::memcpy(palookup[palnum], palookup[0], static_cast<size_t>(numpalookups) << 8);
+        buildgl::markPaletteDirty(palnum);
         return;
     }
     for (long s = 0; s < numpalookups; ++s)
         for (int i = 0; i < 256; ++i)
         {
-            int ri = palette[static_cast<unsigned char>(remapbuf[i]) * 3 + 0];
-            int gi = palette[static_cast<unsigned char>(remapbuf[i]) * 3 + 1];
-            int bi = palette[static_cast<unsigned char>(remapbuf[i]) * 3 + 2];
+            int ri = static_cast<unsigned char>(palette[static_cast<unsigned char>(remapbuf[i]) * 3 + 0]);
+            int gi = static_cast<unsigned char>(palette[static_cast<unsigned char>(remapbuf[i]) * 3 + 1]);
+            int bi = static_cast<unsigned char>(palette[static_cast<unsigned char>(remapbuf[i]) * 3 + 2]);
             if (r | g | b)
             {
                 ri = ri + ((r - ri) * s) / max(1L, numpalookups);
@@ -4875,13 +5166,14 @@ extern "C" void makepalookup(long palnum, char* remapbuf, signed char r, signed 
             }
             else palookup[palnum][(s << 8) + i] = remapbuf[i];
         }
+    buildgl::markPaletteDirty(palnum);
 }
 
 extern "C" void setbrightness(char dabrightness, char* dapal)
 {
     (void)dapal;
     curbrightness = min(max(static_cast<long>(dabrightness), 0L), 15L);
-    for (int i = 0; i < MAXTILES; ++i) buildgl::g.texDirty[i] = 1;
+    buildgl::markAllTexturesDirty();
 }
 extern "C" long getpalookup(long davis, long dashade)
 {
