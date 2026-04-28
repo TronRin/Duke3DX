@@ -24,6 +24,7 @@
 #include <cmath>
 #include <cctype>
 #include <cstdint>
+#include <cstddef>
 #include <cstdio>
 #include <cstdlib>
 #include <cstdarg>
@@ -1089,6 +1090,7 @@ namespace buildgl
         std::array<std::array<GLuint, MAXPALOOKUPS>, MAXTILES> tex{};
         std::array<std::array<unsigned char, MAXPALOOKUPS>, MAXTILES> texReady{};
         std::array<std::array<unsigned char, MAXPALOOKUPS>, MAXTILES> texDirty{};
+        std::array<unsigned char, MAXTILES> fallbackTile{};
         std::vector<unsigned char> tileData[MAXTILES];
     } g;
 
@@ -1499,23 +1501,47 @@ namespace buildgl
 
     static std::string makeArtName(int fileNum)
     {
-        char buf[260];
-        std::strncpy(buf, artfilename[0] ? artfilename : "tiles000.art", sizeof(buf) - 1);
-        buf[sizeof(buf) - 1] = 0;
+        std::string path = artfilename[0] ? artfilename : "tiles000.art";
 
-        // Match the original BUILD convention: mutate the 3 digits in TILES000.ART.
-        const size_t n = std::strlen(buf);
-        if (n >= 8)
+        char digits[4];
+        std::snprintf(digits, sizeof(digits), "%03d", fileNum % 1000);
+
+        // Match the original BUILD convention while also supporting callers
+        // that pass a directory-qualified ART path. The old code always edited
+        // buf[5..7], which only works for exactly "tiles000.art" and makes
+        // higher ART files fail to load when the name is "C:\...\tiles000.art".
+        const size_t slash = path.find_last_of("/\\");
+        const size_t nameStart = (slash == std::string::npos) ? 0 : slash + 1;
+        size_t dot = path.find_last_of('.');
+        if (dot == std::string::npos || dot < nameStart) dot = path.size();
+
+        size_t digitRun = std::string::npos;
+        if (dot >= nameStart + 3)
         {
-            buf[5] = static_cast<char>('0' + ((fileNum / 100) % 10));
-            buf[6] = static_cast<char>('0' + ((fileNum / 10) % 10));
-            buf[7] = static_cast<char>('0' + (fileNum % 10));
+            for (size_t i = dot; i-- > nameStart + 2; )
+            {
+                if (std::isdigit(static_cast<unsigned char>(path[i])) &&
+                    std::isdigit(static_cast<unsigned char>(path[i - 1])) &&
+                    std::isdigit(static_cast<unsigned char>(path[i - 2])))
+                {
+                    digitRun = i - 2;
+                    break;
+                }
+            }
         }
-        else
+
+        if (digitRun != std::string::npos)
         {
-            std::snprintf(buf, sizeof(buf), "tiles%03d.art", fileNum);
+            path[digitRun + 0] = digits[0];
+            path[digitRun + 1] = digits[1];
+            path[digitRun + 2] = digits[2];
+            return path;
         }
-        return std::string(buf);
+
+        const std::string dir = (nameStart == 0) ? std::string() : path.substr(0, nameStart);
+        char leaf[32];
+        std::snprintf(leaf, sizeof(leaf), "tiles%03d.art", fileNum % 1000);
+        return dir + leaf;
     }
 
     static void markTileDirty(short tilenum)
@@ -1544,22 +1570,81 @@ namespace buildgl
             markTileDirty(tile);
     }
 
+    // Duke3D palette swaps live in LOOKUP.DAT, not in PALETTE.DAT's shade
+    // ramps. Keep the renderer's true-color texture cache keyed by these 256
+    // entry remap tables so sprite/wall/sector pal values pick the intended
+    // color variant instead of accidentally indexing a darkness table.
+    static std::array<std::array<unsigned char, 256>, MAXPALOOKUPS> lookupPal{};
+    static std::array<unsigned char, MAXPALOOKUPS> lookupPalReady{};
+
+    static void resetLookupPalettes()
+    {
+        for (int pal = 0; pal < MAXPALOOKUPS; ++pal)
+        {
+            for (int i = 0; i < 256; ++i)
+                lookupPal[pal][i] = static_cast<unsigned char>(i);
+            lookupPalReady[pal] = (pal == 0) ? 1 : 0;
+        }
+    }
+
+    static void installLookupPalette(unsigned char palnum, const unsigned char* table)
+    {
+        const int pal = static_cast<int>(palnum);
+        if (pal < 0 || pal >= MAXPALOOKUPS || !table) return;
+        for (int i = 0; i < 256; ++i)
+            lookupPal[pal][i] = table[i];
+        lookupPalReady[pal] = 1;
+        markPaletteDirty(pal);
+    }
+
+    static void installIdentityLookupPalette(long palnum)
+    {
+        if (palnum < 0 || palnum >= MAXPALOOKUPS) return;
+        for (int i = 0; i < 256; ++i)
+            lookupPal[palnum][i] = static_cast<unsigned char>(i);
+        lookupPalReady[palnum] = (palnum == 0) ? 1 : 0;
+        markPaletteDirty(palnum);
+    }
+
+    static void loadLookupDatPalettes()
+    {
+        short fil = ::kopen4load((char*)"lookup.dat", 0);
+        if (fil < 0) fil = ::kopen4load((char*)"LOOKUP.DAT", 0);
+        if (fil < 0) return;
+
+        unsigned char count = 0;
+        if (::kread(fil, &count, 1) != 1)
+        {
+            ::kclose(fil);
+            return;
+        }
+
+        for (int n = 0; n < static_cast<int>(count); ++n)
+        {
+            unsigned char palnum = 0;
+            unsigned char table[256] = {};
+            if (::kread(fil, &palnum, 1) != 1) break;
+            if (::kread(fil, table, 256) != 256) break;
+            installLookupPalette(palnum, table);
+        }
+        ::kclose(fil);
+    }
+
     static unsigned char remapPaletteIndex(unsigned char idx, unsigned char palnum)
     {
         if (idx == 255) return idx;
 
         const int palSlot = static_cast<int>(palnum);
-        const char* lookup = nullptr;
-        if (palSlot >= 0 && palSlot < MAXPALOOKUPS && palookup[palSlot])
-            lookup = palookup[palSlot];
-        else if (palookup[0])
-            lookup = palookup[0];
+        if (palSlot > 0 && palSlot < MAXPALOOKUPS && lookupPalReady[palSlot])
+            return lookupPal[palSlot][idx];
 
-        // palookup[p] is a numpalookups*256 shade table. Row 0 contains the
-        // actual lookup-palette color remap; lighting still comes from
-        // glColorShade() and fog in this GL shim.
-        if (lookup)
-            return static_cast<unsigned char>(lookup[idx]);
+        // makepalookup() can create runtime remaps after LOOKUP.DAT has been
+        // read. Use row 0 of those generated tables as a last-resort remap, but
+        // do not fall back to palookup[0]: PALETTE.DAT palookup[0] is a shade
+        // ramp, not a sprite palette swap.
+        if (palSlot > 0 && palSlot < MAXPALOOKUPS && palookup[palSlot])
+            return static_cast<unsigned char>(palookup[palSlot][idx]);
+
         return idx;
     }
 
@@ -1579,6 +1664,7 @@ namespace buildgl
             for (int x = 0; x < 64; ++x)
                 g.tileData[tilenum][x * 64 + y] = static_cast<unsigned char>(((x >> 3) ^ (y >> 3)) & 1 ? 180 : 96);
         waloff[tilenum] = BUILDGL_PTR_TO_LONG(g.tileData[tilenum].data());
+        g.fallbackTile[tilenum] = 1;
         picsiz[tilenum] = (6 | (6 << 4));
         markTileDirty(tilenum);
     }
@@ -1631,19 +1717,57 @@ namespace buildgl
         g.texDirty[tilenum][palSlot] = 0;
     }
 
-    static void bindTilePal(short tilenum, unsigned char palnum)
+    static bool bindTilePal(short tilenum, unsigned char palnum, bool allowFallback = true)
     {
-        if (tilenum < 0 || tilenum >= MAXTILES) tilenum = 0;
+        if (tilenum < 0 || tilenum >= MAXTILES)
+        {
+            if (!allowFallback) return false;
+            tilenum = 0;
+        }
+
+        if (!allowFallback && g.fallbackTile[tilenum]) return false;
+
         const int palSlot = static_cast<int>(palnum) & (MAXPALOOKUPS - 1);
         if (!waloff[tilenum]) loadtile(tilenum);
-        if (!waloff[tilenum]) ensureFallbackTile(tilenum);
+        if (!waloff[tilenum])
+        {
+            if (!allowFallback) return false;
+            ensureFallbackTile(tilenum);
+        }
+
+        if (!allowFallback && g.fallbackTile[tilenum]) return false;
+        if (!waloff[tilenum] || tilesizx[tilenum] <= 0 || tilesizy[tilenum] <= 0)
+            return false;
+
         uploadTexture(tilenum, static_cast<unsigned char>(palSlot));
         glBindTexture(GL_TEXTURE_2D, g.tex[tilenum][palSlot]);
+        return true;
     }
 
-    static void bindTile(short tilenum)
+    static bool bindTile(short tilenum, bool allowFallback = true)
     {
-        bindTilePal(tilenum, 0);
+        return bindTilePal(tilenum, 0, allowFallback);
+    }
+
+    static float tilePanningScale(short tilenum, bool yAxis)
+    {
+        if ((unsigned short)tilenum >= MAXTILES) return 1.0f;
+        const int shift = yAxis ? ((picsiz[tilenum] >> 4) & 15) : (picsiz[tilenum] & 15);
+        long powSize = 1L << min(max(shift, 0), 15);
+        const long actual = yAxis ? tilesizy[tilenum] : tilesizx[tilenum];
+
+        // BUILD stores panning in 0..255 over the power-of-two tile span used
+        // by the software renderer, not in raw texels. For 64px art, one pan
+        // unit is 64/256 = 0.25 texels. Using the raw byte made offsets 4x too
+        // large on common Duke3D textures and looked randomly wrong whenever a
+        // map relied on panning instead of a zero offset.
+        if (powSize < max(1L, actual)) powSize <<= 1;
+        return static_cast<float>(max(1L, powSize));
+    }
+
+    static float panningToTexels(short tilenum, unsigned char pan, bool yAxis)
+    {
+        return static_cast<float>(pan) * tilePanningScale(tilenum, yAxis) / 256.0f;
     }
 
     static void calcFloorTex(short tilenum, const sectortype& sec, bool ceiling, long x, long y, float& u, float& v)
@@ -1691,8 +1815,8 @@ namespace buildgl
         if (stat & 16) uPix = -uPix;
         if (stat & 32) vPix = -vPix;
 
-        uPix += static_cast<float>(ceiling ? sec.ceilingxpanning : sec.floorxpanning);
-        vPix += static_cast<float>(ceiling ? sec.ceilingypanning : sec.floorypanning);
+        uPix += panningToTexels(tilenum, static_cast<unsigned char>(ceiling ? sec.ceilingxpanning : sec.floorxpanning), false);
+        vPix += panningToTexels(tilenum, static_cast<unsigned char>(ceiling ? sec.ceilingypanning : sec.floorypanning), true);
 
         u = uPix / tw;
         v = vPix / th;
@@ -2029,6 +2153,132 @@ namespace buildgl
         glPopAttrib();
     }
 
+    struct TessLoop
+    {
+        std::vector<int> walls;
+        std::vector<Vec2> pts;
+        double area = 0.0;
+        bool hole = false;
+    };
+
+    static bool samePoint2(const Vec2& a, const Vec2& b)
+    {
+        return std::fabs(a.x - b.x) < 0.5 && std::fabs(a.y - b.y) < 0.5;
+    }
+
+    static bool pointInPoly2D(const Vec2& p, const std::vector<Vec2>& poly)
+    {
+        bool inside = false;
+        const size_t n = poly.size();
+        if (n < 3) return false;
+        for (size_t i = 0, j = n - 1; i < n; j = i++)
+        {
+            const Vec2& a = poly[i];
+            const Vec2& b = poly[j];
+            const bool crosses = ((a.y > p.y) != (b.y > p.y));
+            if (!crosses) continue;
+            const double xAtY = (b.x - a.x) * (p.y - a.y) / ((b.y - a.y) + 1e-30) + a.x;
+            if (p.x < xAtY) inside = !inside;
+        }
+        return inside;
+    }
+
+    static Vec2 loopCentroidApprox(const std::vector<Vec2>& pts)
+    {
+        Vec2 c{ 0.0, 0.0 };
+        if (pts.empty()) return c;
+        for (const Vec2& p : pts)
+        {
+            c.x += p.x;
+            c.y += p.y;
+        }
+        c.x /= static_cast<double>(pts.size());
+        c.y /= static_cast<double>(pts.size());
+        return c;
+    }
+
+    static std::vector<TessLoop> prepareTessLoops(const std::vector<std::vector<int>>& rawLoops)
+    {
+        std::vector<TessLoop> out;
+        out.reserve(rawLoops.size());
+
+        for (const auto& raw : rawLoops)
+        {
+            TessLoop loop;
+            loop.walls.reserve(raw.size());
+            loop.pts.reserve(raw.size());
+
+            for (int wi : raw)
+            {
+                if (wi < 0 || wi >= numwalls) continue;
+                Vec2 p{ static_cast<double>(wall[wi].x), static_cast<double>(wall[wi].y) };
+                if (!loop.pts.empty() && samePoint2(loop.pts.back(), p))
+                    continue;
+                loop.walls.push_back(wi);
+                loop.pts.push_back(p);
+            }
+
+            if (loop.pts.size() >= 2 && samePoint2(loop.pts.front(), loop.pts.back()))
+            {
+                loop.pts.pop_back();
+                loop.walls.pop_back();
+            }
+
+            // Drop exactly/near collinear vertices. GLU accepts them most of the
+            // time, but the classic E1L1 bathroom has tiny degenerate corners
+            // that can make one triangle disappear on some GLU builds.
+            bool changed = true;
+            while (changed && loop.pts.size() > 3)
+            {
+                changed = false;
+                for (size_t i = 0; i < loop.pts.size(); ++i)
+                {
+                    const Vec2& a = loop.pts[(i + loop.pts.size() - 1) % loop.pts.size()];
+                    const Vec2& b = loop.pts[i];
+                    const Vec2& c = loop.pts[(i + 1) % loop.pts.size()];
+                    const double cr = cross(a, b, c);
+                    const double dot = (b.x - a.x) * (c.x - b.x) + (b.y - a.y) * (c.y - b.y);
+                    if (std::fabs(cr) <= 0.01 && dot >= 0.0)
+                    {
+                        loop.pts.erase(loop.pts.begin() + static_cast<std::ptrdiff_t>(i));
+                        loop.walls.erase(loop.walls.begin() + static_cast<std::ptrdiff_t>(i));
+                        changed = true;
+                        break;
+                    }
+                }
+            }
+
+            if (loop.pts.size() < 3) continue;
+            loop.area = area2(loop.pts);
+            if (std::fabs(loop.area) < 1.0) continue;
+            out.push_back(std::move(loop));
+        }
+
+        for (size_t i = 0; i < out.size(); ++i)
+        {
+            const Vec2 c = loopCentroidApprox(out[i].pts);
+            int depth = 0;
+            for (size_t j = 0; j < out.size(); ++j)
+            {
+                if (i == j) continue;
+                if (std::fabs(out[j].area) <= std::fabs(out[i].area)) continue;
+                if (pointInPoly2D(c, out[j].pts)) ++depth;
+            }
+
+            out[i].hole = (depth & 1) != 0;
+            const bool wantsPositiveWinding = !out[i].hole;
+            const bool hasPositiveWinding = out[i].area > 0.0;
+            if (wantsPositiveWinding != hasPositiveWinding)
+            {
+                std::reverse(out[i].pts.begin(), out[i].pts.end());
+                std::reverse(out[i].walls.begin(), out[i].walls.end());
+                out[i].area = -out[i].area;
+            }
+        }
+
+        return out;
+    }
+
     static void renderSectorSurface(short sectnum, bool ceiling)
     {
         if (sectnum < 0 || sectnum >= numsectors) return;
@@ -2049,8 +2299,43 @@ namespace buildgl
         glDepthMask(GL_TRUE);
         glColorShade((ceiling ? sec.ceilingshade : sec.floorshade));
 
-        auto loops = collectLoops(sectnum);
+        auto loops = prepareTessLoops(collectLoops(sectnum));
         if (loops.empty()) return;
+
+        if (loops.size() == 1 && !loops[0].hole)
+        {
+            // No holes are present, so avoid GLU's occasional dropped triangle
+            // behavior on tiny concave/near-collinear BUILD sectors. Ear
+            // clipping is deterministic for the common single-loop case; GLU is
+            // kept below for true nested-loop sectors where holes matter.
+            const std::vector<Vec2>& pts = loops[0].pts;
+            std::vector<int> tris = triangulate(pts);
+            if (tris.empty())
+            {
+                for (int i = 1; i + 1 < static_cast<int>(pts.size()); ++i)
+                {
+                    tris.push_back(0);
+                    tris.push_back(i);
+                    tris.push_back(i + 1);
+                }
+            }
+
+            glBegin(GL_TRIANGLES);
+            for (size_t i = 0; i + 2 < tris.size(); i += 3)
+            {
+                int order[3] = { tris[i], tris[i + (ceiling ? 2 : 1)], tris[i + (ceiling ? 1 : 2)] };
+                for (int k = 0; k < 3; ++k)
+                {
+                    int pi = order[k];
+                    long x = static_cast<long>(std::llround(pts[pi].x));
+                    long y = static_cast<long>(std::llround(pts[pi].y));
+                    texFloor(pic, sec, ceiling, x, y);
+                    vertexBuild(x, y, slopeZ(sectnum, x, y, ceiling));
+                }
+            }
+            glEnd();
+            return;
+        }
 
         GLUtesselator* tess = gluNewTess();
         if (!tess)
@@ -2060,9 +2345,8 @@ namespace buildgl
             // nested-loop sectors/holes such as trash bins and counters.
             for (const auto& loop : loops)
             {
-                std::vector<Vec2> pts;
-                pts.reserve(loop.size());
-                for (int wi : loop) pts.push_back(Vec2{ static_cast<double>(wall[wi].x), static_cast<double>(wall[wi].y) });
+                if (loop.hole) continue;
+                const std::vector<Vec2>& pts = loop.pts;
                 std::vector<int> tris = triangulate(pts);
                 if (tris.empty())
                 {
@@ -2106,9 +2390,9 @@ namespace buildgl
         gluTessBeginPolygon(tess, nullptr);
         for (const auto& loop : loops)
         {
-            if (loop.size() < 3) continue;
+            if (loop.walls.size() < 3) continue;
             gluTessBeginContour(tess);
-            for (int wi : loop)
+            for (int wi : loop.walls)
             {
                 if (wi < 0 || wi >= numwalls) continue;
                 const long x = wall[wi].x;
@@ -2166,7 +2450,7 @@ namespace buildgl
             pic = 0;
         }
 
-        bindTilePal(pic, palnum);
+        if (!bindTilePal(pic, palnum, !transparent)) return;
 
         // cstat 16 is a true masked/cutout wall: palette index 255 is
         // transparent. cstat 32 by itself is a one-way wall that uses
@@ -2204,10 +2488,12 @@ namespace buildgl
         const float xrep = static_cast<float>(std::max<int>(1, w.xrepeat));
         const float yrep = static_cast<float>(std::max<int>(1, w.yrepeat));
 
-        // BUILD's wall U coordinate is driven by xrepeat<<3 across the wall,
-        // not by world-space wall length. The map editor stores xrepeat as the
-        // already-adjusted texture scale.
-        float u0 = static_cast<float>(w.xpanning);
+        // BUILD's wall U coordinate is driven by xrepeat<<3 across the wall.
+        // xpanning is already in U texels for walls, but ypanning is a 0..255
+        // fraction of the tile's power-of-two height, like floor/ceiling pan.
+        const float xPan = static_cast<float>(w.xpanning);
+        const float yPan = panningToTexels(pic, static_cast<unsigned char>(w.ypanning), true);
+        float u0 = xPan;
         float u1 = u0 + xrep * 8.0f;
         if (w.cstat & 8) std::swap(u0, u1);
 
@@ -2219,17 +2505,17 @@ namespace buildgl
             // Bottom-aligned walls stay pinned to the full wall bottom. This is
             // especially important for masked portal walls: only the visible
             // portal opening should be clipped, not stretched.
-            vTop1 = static_cast<float>(w.ypanning) - static_cast<float>(refBot1 - zTop1) * vScale;
-            vTop2 = static_cast<float>(w.ypanning) - static_cast<float>(refBot2 - zTop2) * vScale;
-            vBot1 = static_cast<float>(w.ypanning) - static_cast<float>(refBot1 - zBot1) * vScale;
-            vBot2 = static_cast<float>(w.ypanning) - static_cast<float>(refBot2 - zBot2) * vScale;
+            vTop1 = yPan - static_cast<float>(refBot1 - zTop1) * vScale;
+            vTop2 = yPan - static_cast<float>(refBot2 - zTop2) * vScale;
+            vBot1 = yPan - static_cast<float>(refBot1 - zBot1) * vScale;
+            vBot2 = yPan - static_cast<float>(refBot2 - zBot2) * vScale;
         }
         else
         {
-            vTop1 = static_cast<float>(w.ypanning) + static_cast<float>(zTop1 - refTop1) * vScale;
-            vTop2 = static_cast<float>(w.ypanning) + static_cast<float>(zTop2 - refTop2) * vScale;
-            vBot1 = static_cast<float>(w.ypanning) + static_cast<float>(zBot1 - refTop1) * vScale;
-            vBot2 = static_cast<float>(w.ypanning) + static_cast<float>(zBot2 - refTop2) * vScale;
+            vTop1 = yPan + static_cast<float>(zTop1 - refTop1) * vScale;
+            vTop2 = yPan + static_cast<float>(zTop2 - refTop2) * vScale;
+            vBot1 = yPan + static_cast<float>(zBot1 - refTop1) * vScale;
+            vBot2 = yPan + static_cast<float>(zBot2 - refTop2) * vScale;
         }
 
         if (w.cstat & 256)
@@ -2394,6 +2680,7 @@ namespace buildgl
         const long bot2 = min(f2, nf2);
         if (bot1 <= top1 && bot2 <= top2) return;
 
+        const walltype* maskTexWall = &mw;
         short maskPic = mw.overpicnum;
         unsigned char maskPal = static_cast<unsigned char>(mw.pal);
 
@@ -2403,6 +2690,7 @@ namespace buildgl
             if ((other.cstat & 48) && validMaskedPic(other.overpicnum) &&
                 (!validMaskedPic(maskPic) || (maskPic == 0 && other.overpicnum != 0)))
             {
+                maskTexWall = &other;
                 maskPic = other.overpicnum;
                 maskPal = static_cast<unsigned char>(other.pal);
             }
@@ -2412,9 +2700,9 @@ namespace buildgl
             return;
 
         applySectorFog(drawSect);
-        const long maskShade = static_cast<long>(sector[drawSect].floorshade) + static_cast<long>(mw.shade);
+        const long maskShade = static_cast<long>(sector[drawSect].floorshade) + static_cast<long>(maskTexWall->shade);
 
-        drawWallSpan(mw, mw.x, mw.y, mw2.x, mw2.y,
+        drawWallSpan(*maskTexWall, mw.x, mw.y, mw2.x, mw2.y,
             top1, top2, bot1, bot2,
             maskPic, maskPal, maskShade, true,
             c1, c2, f1, f2);
@@ -2556,14 +2844,32 @@ namespace buildgl
 
                 if (!skyFloorPortal && (nf1 < f1 || nf2 < f2))
                 {
+                    walltype lowerMapWall = w;
+                    const walltype* lowerPicWall = &w;
                     short bottomPic = w.picnum;
                     unsigned char bottomPal = static_cast<unsigned char>(w.pal);
+                    long bottomShade = shade;
+
                     if ((w.cstat & 2) && w.nextwall >= 0 && w.nextwall < numwalls)
                     {
-                        bottomPic = wall[w.nextwall].picnum;
-                        bottomPal = static_cast<unsigned char>(wall[w.nextwall].pal);
+                        // Bottom-swap uses the neighbor side's picture/palette,
+                        // y-panning, bottom-align, and y-flip, but keeps this
+                        // side's xrepeat/yrepeat and x-flip mapping. Passing
+                        // nextwall wholesale made only bottom-swapped bands use
+                        // the wrong repeat/orientation, which is why UVs looked
+                        // fine most of the time and then broke on specific
+                        // portal lower walls.
+                        lowerPicWall = &wall[w.nextwall];
+                        bottomPic = lowerPicWall->picnum;
+                        bottomPal = static_cast<unsigned char>(lowerPicWall->pal);
+                        bottomShade = static_cast<long>(sec.floorshade) + static_cast<long>(lowerPicWall->shade);
+                        lowerMapWall.xpanning = lowerPicWall->xpanning;
+                        lowerMapWall.ypanning = lowerPicWall->ypanning;
+                        lowerMapWall.cstat = static_cast<short>((w.cstat & 8) | (lowerPicWall->cstat & (4 | 256)));
                     }
-                    drawWallSpan(w, w.x, w.y, w2.x, w2.y, nf1, nf2, f1, f2, bottomPic, bottomPal, shade, false, c1, c2, f1, f2);
+
+                    drawWallSpan(lowerMapWall, w.x, w.y, w2.x, w2.y, nf1, nf2, f1, f2,
+                        bottomPic, bottomPal, bottomShade, false, c1, c2, f1, f2);
                 }
             }
         }
@@ -2582,6 +2888,13 @@ namespace buildgl
         glTexCoord2f(u0, v1); glVertex3f(d.x, d.y, d.z);
         glEnd();
     }
+
+#ifndef BUILDGL_FLOOR_SPRITE_DEPTH_BIAS
+    // Floor-aligned sprites are often placed exactly on a floor/ceiling plane. A
+    // tiny upward bias prevents coplanar z fighting and keeps effects such as fire
+    // decals from disappearing into the surface while remaining visually invisible.
+#define BUILDGL_FLOOR_SPRITE_DEPTH_BIAS 0.0015f
+#endif
 
     static void renderSprites()
     {
@@ -2647,7 +2960,8 @@ namespace buildgl
             if (picanm[pic] & 192)
                 pic = static_cast<short>(pic + animateoffs(pic, static_cast<short>(ownerForAnim + 32768)));
             if ((unsigned short)pic >= MAXTILES) pic = 0;
-            bindTilePal(pic, static_cast<unsigned char>(s.pal));
+            if (!bindTilePal(pic, static_cast<unsigned char>(s.pal), false))
+                continue;
 
             const float tw = static_cast<float>(max(1L, tilesizx[pic]));
             const float th = static_cast<float>(max(1L, tilesizy[pic]));
@@ -2675,7 +2989,12 @@ namespace buildgl
                 if ((s.cstat & 128) == 0) c.y += height * 0.5f;
                 c.x += right.x * xoff;
                 c.z += right.z * xoff;
-                c.y -= yoff;
+                // BUILD yoffset/picanm y-center is subtracted from the sprite's
+                // Z in map space. Since GL Y is -Z, the visual offset must be
+                // added here. The old sign pushed positive-offset effects down
+                // into floors, which is why some fire sprites looked buried or
+                // disappeared.
+                c.y += yoff;
 
                 const float hw = width * 0.5f, hh = height * 0.5f;
                 Vec3 p0{ c.x - right.x * hw, c.y + hh, c.z - right.z * hw };
@@ -2695,7 +3014,12 @@ namespace buildgl
                 if ((s.cstat & 128) == 0) c.y += height * 0.5f;
                 c.x += right.x * xoff;
                 c.z += right.z * xoff;
-                c.y -= yoff;
+                // BUILD yoffset/picanm y-center is subtracted from the sprite's
+                // Z in map space. Since GL Y is -Z, the visual offset must be
+                // added here. The old sign pushed positive-offset effects down
+                // into floors, which is why some fire sprites looked buried or
+                // disappeared.
+                c.y += yoff;
 
                 const float hw = width * 0.5f, hh = height * 0.5f;
                 Vec3 p0{ c.x - right.x * hw, c.y + hh, c.z - right.z * hw };
@@ -2711,6 +3035,7 @@ namespace buildgl
                 const Vec3 forward{ static_cast<float>(-std::sin(a)), 0.0f, static_cast<float>(std::cos(a)) };
                 c.x += right.x * xoff + forward.x * yoff;
                 c.z += right.z * xoff + forward.z * yoff;
+                c.y += BUILDGL_FLOOR_SPRITE_DEPTH_BIAS;
 
                 const float hw = width * 0.5f, hd = height * 0.5f;
                 Vec3 p0{ c.x - right.x * hw - forward.x * hd, c.y, c.z - right.z * hw - forward.z * hd };
@@ -2891,6 +3216,8 @@ extern "C" void loadpalette()
 {
     if (paletteloaded) return;
 
+    buildgl::resetLookupPalettes();
+
     // Fallback VGA-ish grayscale/colored palette.
     for (int i = 0; i < 256; ++i)
     {
@@ -2923,6 +3250,7 @@ extern "C" void loadpalette()
         }
     }
 
+    buildgl::loadLookupDatPalettes();
     buildgl::markAllTexturesDirty();
     paletteloaded = 1;
 }
@@ -2937,6 +3265,11 @@ extern "C" int loadpics(char* filename)
         tilesizx[i] = tilesizy[i] = picanm[i] = tilefileoffs[i] = 0;
         tilefilenum[i] = 0;
         picsiz[i] = 0;
+        waloff[i] = 0;
+        walock[i] = 0;
+        buildgl::g.tileData[i].clear();
+        buildgl::g.fallbackTile[i] = 0;
+        buildgl::markTileDirty(static_cast<short>(i));
     }
 
     numtilefiles = 0;
@@ -3013,6 +3346,7 @@ extern "C" void loadtile(short tilenume)
     kclose(fil);
 
     waloff[tilenume] = BUILDGL_PTR_TO_LONG(buildgl::g.tileData[tilenume].data());
+    buildgl::g.fallbackTile[tilenume] = 0;
     walock[tilenume] = 199;
     buildgl::markTileDirty(tilenume);
 }
@@ -3022,6 +3356,7 @@ extern "C" long allocatepermanenttile(short tilenume, long xsiz, long ysiz)
     if ((unsigned short)tilenume >= MAXTILES || xsiz <= 0 || ysiz <= 0) return 0;
     buildgl::g.tileData[tilenume].assign(static_cast<size_t>(xsiz * ysiz), 255);
     waloff[tilenume] = BUILDGL_PTR_TO_LONG(buildgl::g.tileData[tilenume].data());
+    buildgl::g.fallbackTile[tilenume] = 0;
     walock[tilenume] = 255;
     tilesizx[tilenume] = xsiz;
     tilesizy[tilenume] = ysiz;
@@ -3169,6 +3504,7 @@ extern "C" void uninitengine()
     for (int i = 0; i < MAXTILES; ++i)
     {
         buildgl::g.tileData[i].clear();
+        buildgl::g.fallbackTile[i] = 0;
         waloff[i] = 0;
     }
 }
@@ -3230,7 +3566,7 @@ extern "C" void scansector(short sectnum)
         for (int wi = start; wi < end && wi < numwalls; ++wi)
         {
             short ns = wall[wi].nextsector;
-            if (ns >= 0 && ns < numsectors && ((wall[wi].cstat & 32) == 0) &&
+            if (ns >= 0 && ns < numsectors &&
                 !(gotsector[ns >> 3] & pow2char[ns & 7]) && sectorbordercnt < 255)
                 sectorborder[sectorbordercnt++] = ns;
             if ((wall[wi].cstat & 48) && maskwallcnt < MAXWALLSB)
@@ -4924,7 +5260,7 @@ extern "C" void dorotatesprite(long sx, long sy, long z, short a, short picnum, 
     if ((unsigned short)picnum >= MAXTILES || z <= 0) return;
     if (picanm[picnum] & 192) picnum = static_cast<short>(picnum + animateoffs(picnum, static_cast<short>(0xc000)));
     if ((unsigned short)picnum >= MAXTILES) picnum = 0;
-    buildgl::bindTilePal(picnum, static_cast<unsigned char>(dapalnum));
+    if (!buildgl::bindTilePal(picnum, static_cast<unsigned char>(dapalnum), false)) return;
 
     float x = static_cast<float>(sx) / 65536.0f;
     float y = static_cast<float>(sy) / 65536.0f;
@@ -5148,7 +5484,7 @@ extern "C" void makepalookup(long palnum, char* remapbuf, signed char r, signed 
     if (!remapbuf || dastat == 0)
     {
         if (palookup[0]) std::memcpy(palookup[palnum], palookup[0], static_cast<size_t>(numpalookups) << 8);
-        buildgl::markPaletteDirty(palnum);
+        buildgl::installIdentityLookupPalette(palnum);
         return;
     }
     for (long s = 0; s < numpalookups; ++s)
@@ -5166,7 +5502,10 @@ extern "C" void makepalookup(long palnum, char* remapbuf, signed char r, signed 
             }
             else palookup[palnum][(s << 8) + i] = remapbuf[i];
         }
-    buildgl::markPaletteDirty(palnum);
+    unsigned char remapRow[256];
+    for (int i = 0; i < 256; ++i)
+        remapRow[i] = static_cast<unsigned char>(palookup[palnum][i]);
+    buildgl::installLookupPalette(static_cast<unsigned char>(palnum), remapRow);
 }
 
 extern "C" void setbrightness(char dabrightness, char* dapal)
