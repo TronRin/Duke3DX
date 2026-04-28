@@ -3182,6 +3182,236 @@ namespace buildgl
         end2D();
     }
 
+
+    struct BuildMostSpan
+    {
+        bool valid = false;
+        int x0 = 0;
+        int x1 = 0;
+        int cy0 = 0;
+        int cy1 = 0;
+        int fy0 = 0;
+        int fy1 = 0;
+        int ncy0 = 0;
+        int ncy1 = 0;
+        int nfy0 = 0;
+        int nfy1 = 0;
+    };
+
+    static int mostClampY(double y)
+    {
+        if (y < 0.0) return 0;
+        const int maxY = static_cast<int>(max(1L, ydim) - 1);
+        if (y > static_cast<double>(maxY)) return maxY;
+        return static_cast<int>(std::lround(y));
+    }
+
+    static int mostLerpInt(int a, int b, int x, int x0, int x1)
+    {
+        if (x1 == x0) return a;
+        return a + static_cast<int>((static_cast<long long>(b - a) * static_cast<long long>(x - x0)) / static_cast<long long>(x1 - x0));
+    }
+
+    static bool mostProjectWallBase(short sectnum, int wi, BuildMostSpan& out)
+    {
+        if (sectnum < 0 || sectnum >= numsectors || wi < 0 || wi >= numwalls)
+            return false;
+
+        const walltype& w = wall[wi];
+        if (w.point2 < 0 || w.point2 >= numwalls)
+            return false;
+
+        const walltype& w2 = wall[w.point2];
+
+        const double ca = static_cast<double>(cosglobalang) / 16384.0;
+        const double sa = static_cast<double>(singlobalang) / 16384.0;
+
+        auto toView = [&](long x, long y, double& vx, double& vy)
+            {
+                const double dx = static_cast<double>(x - globalposx);
+                const double dy = static_cast<double>(y - globalposy);
+                vx = dy * ca - dx * sa;
+                vy = dx * ca + dy * sa;
+            };
+
+        double vx0 = 0.0, vy0 = 0.0, vx1 = 0.0, vy1 = 0.0;
+        toView(w.x, w.y, vx0, vy0);
+        toView(w2.x, w2.y, vx1, vy1);
+
+        const double nearPlane = 16.0;
+        if (vy0 <= nearPlane && vy1 <= nearPlane)
+            return false;
+
+        if (vy0 <= nearPlane)
+        {
+            const double t = (nearPlane - vy0) / (vy1 - vy0);
+            vx0 += (vx1 - vx0) * t;
+            vy0 = nearPlane;
+        }
+        if (vy1 <= nearPlane)
+        {
+            const double t = (nearPlane - vy1) / (vy0 - vy1);
+            vx1 += (vx0 - vx1) * t;
+            vy1 = nearPlane;
+        }
+
+        // Same BUILD projection shape used by classic/Polymost: x is lateral / depth.
+        const double halfW = static_cast<double>(halfxdimen > 0 ? halfxdimen : (xdim >> 1));
+        const double screenScale = halfW * (static_cast<double>(viewingrange) / 65536.0);
+        double sx0 = halfW + (vx0 * screenScale) / max(1.0, vy0);
+        double sx1 = halfW + (vx1 * screenScale) / max(1.0, vy1);
+
+        if (sx1 <= sx0)
+            return false;
+
+        int x0 = static_cast<int>(std::floor(sx0));
+        int x1 = static_cast<int>(std::ceil(sx1));
+        if (x1 < 0 || x0 >= xdim)
+            return false;
+
+        x0 = max(0, x0);
+        x1 = min<int>(static_cast<int>(xdim - 1), x1);
+        if (x1 <= x0)
+            return false;
+
+        auto screenY = [&](long z, double depth) -> int
+            {
+                // BUILD Z grows downward. Convert z relative to the camera into a
+                // projected screen Y using the same sign convention as classic: the
+                // ceiling is smaller screen-Y, the floor is larger screen-Y.
+                const double relz = static_cast<double>(z - globalposz);
+                const double y = static_cast<double>(globalhoriz) + (relz * (static_cast<double>(yxaspect) / 65536.0)) / max(1.0, depth);
+                return mostClampY(y * (static_cast<double>(ydim) / 200.0));
+            };
+
+        out.valid = true;
+        out.x0 = x0;
+        out.x1 = x1;
+        out.cy0 = screenY(slopeZ(sectnum, w.x, w.y, true), vy0);
+        out.cy1 = screenY(slopeZ(sectnum, w2.x, w2.y, true), vy1);
+        out.fy0 = screenY(slopeZ(sectnum, w.x, w.y, false), vy0);
+        out.fy1 = screenY(slopeZ(sectnum, w2.x, w2.y, false), vy1);
+        out.ncy0 = out.cy0;
+        out.ncy1 = out.cy1;
+        out.nfy0 = out.fy0;
+        out.nfy1 = out.fy1;
+        return true;
+    }
+
+    static bool mostProjectPortal(short sectnum, int wi, BuildMostSpan& out)
+    {
+        if (!mostProjectWallBase(sectnum, wi, out))
+            return false;
+
+        const walltype& w = wall[wi];
+        if (w.point2 < 0 || w.point2 >= numwalls)
+            return false;
+
+        const short nextsect = w.nextsector;
+        if (nextsect < 0 || nextsect >= numsectors)
+            return false;
+
+        const walltype& w2 = wall[w.point2];
+
+        const double ca = static_cast<double>(cosglobalang) / 16384.0;
+        const double sa = static_cast<double>(singlobalang) / 16384.0;
+
+        auto depthOnly = [&](long x, long y) -> double
+            {
+                const double dx = static_cast<double>(x - globalposx);
+                const double dy = static_cast<double>(y - globalposy);
+                return dx * ca + dy * sa;
+            };
+
+        double d0 = max(16.0, depthOnly(w.x, w.y));
+        double d1 = max(16.0, depthOnly(w2.x, w2.y));
+
+        auto screenY = [&](long z, double depth) -> int
+            {
+                const double relz = static_cast<double>(z - globalposz);
+                const double y = static_cast<double>(globalhoriz) + (relz * (static_cast<double>(yxaspect) / 65536.0)) / max(1.0, depth);
+                return mostClampY(y * (static_cast<double>(ydim) / 200.0));
+            };
+
+        out.ncy0 = screenY(slopeZ(nextsect, w.x, w.y, true), d0);
+        out.ncy1 = screenY(slopeZ(nextsect, w2.x, w2.y, true), d1);
+        out.nfy0 = screenY(slopeZ(nextsect, w.x, w.y, false), d0);
+        out.nfy1 = screenY(slopeZ(nextsect, w2.x, w2.y, false), d1);
+        return true;
+    }
+
+    static bool mostRangeStillVisible(const BuildMostSpan& span)
+    {
+        if (!span.valid)
+            return false;
+
+        for (int x = span.x0; x <= span.x1; ++x)
+        {
+            if (x >= 0 && x < MAXXDIM && umost[x] < dmost[x])
+                return true;
+        }
+        return false;
+    }
+
+    static void mostClipToPortalOpening(const BuildMostSpan& span)
+    {
+        if (!span.valid)
+            return;
+
+        for (int x = span.x0; x <= span.x1 && x < MAXXDIM; ++x)
+        {
+            if (x < 0) continue;
+
+            const int cy = mostLerpInt(span.cy0, span.cy1, x, span.x0, span.x1);
+            const int fy = mostLerpInt(span.fy0, span.fy1, x, span.x0, span.x1);
+            const int ncy = mostLerpInt(span.ncy0, span.ncy1, x, span.x0, span.x1);
+            const int nfy = mostLerpInt(span.nfy0, span.nfy1, x, span.x0, span.x1);
+
+            // Portal opening is the overlap of this sector and the neighbor.
+            // Do not close unrelated solid spans during sector discovery here;
+            // doing that makes the scan order decide visibility and causes
+            // frame-to-frame flicker when another portal would have provided a
+            // wider opening to the same sector.
+            const int openTop = max(cy, ncy);
+            const int openBot = min(fy, nfy);
+
+            if (openTop >= openBot)
+            {
+                umost[x] = dmost[x];
+                continue;
+            }
+
+            umost[x] = static_cast<short>(max<int>(umost[x], min<int>(openTop, dmost[x])));
+            dmost[x] = static_cast<short>(min<int>(dmost[x], max<int>(openBot, umost[x])));
+        }
+    }
+
+    static void mostCloseSolidWall(short sectnum, int wi)
+    {
+        BuildMostSpan span;
+        if (!mostProjectWallBase(sectnum, wi, span))
+            return;
+
+        for (int x = span.x0; x <= span.x1 && x < MAXXDIM; ++x)
+        {
+            if (x >= 0)
+                umost[x] = dmost[x];
+        }
+    }
+
+    static void mostInitFullScreen()
+    {
+        const int maxX = min<int>(static_cast<int>(xdim), MAXXDIM);
+        const short bottom = static_cast<short>(max(0L, ydim - 1));
+        for (int x = 0; x < maxX; ++x)
+        {
+            umost[x] = 0;
+            dmost[x] = bottom;
+            startumost[x] = umost[x];
+            startdmost[x] = dmost[x];
+        }
+    }
+
 } // namespace buildgl
 
 // -----------------------------------------------------------------------------
@@ -3539,16 +3769,25 @@ extern "C" void drawrooms(long daposx, long daposy, long daposz, short daang, lo
 extern "C" void scansector(short sectnum)
 {
     if (sectnum < 0 || sectnum >= numsectors) return;
+
     show2dsector[sectnum >> 3] |= pow2char[sectnum & 7];
-    sectorborder[0] = sectnum; sectorbordercnt = 1;
     std::memset(gotsector, 0, sizeof(gotsector));
+    spritesortcnt = 0;
+    maskwallcnt = 0;
+
+    buildgl::mostInitFullScreen();
+
+    sectorborder[0] = sectnum;
+    sectorbordercnt = 1;
 
     while (sectorbordercnt > 0)
     {
         short s = sectorborder[--sectorbordercnt];
         if (s < 0 || s >= numsectors) continue;
         if (gotsector[s >> 3] & pow2char[s & 7]) continue;
+
         gotsector[s >> 3] |= pow2char[s & 7];
+        show2dsector[s >> 3] |= pow2char[s & 7];
 
         for (short spr = headspritesect[s]; spr >= 0; spr = nextspritesect[spr])
         {
@@ -3562,18 +3801,47 @@ extern "C" void scansector(short sectnum)
             }
         }
 
-        int start = sector[s].wallptr, end = start + sector[s].wallnum;
+        int start = sector[s].wallptr;
+        int end = start + sector[s].wallnum;
+        if (start < 0 || end > numwalls) continue;
+
         for (int wi = start; wi < end && wi < numwalls; ++wi)
         {
-            short ns = wall[wi].nextsector;
-            if (ns >= 0 && ns < numsectors &&
-                !(gotsector[ns >> 3] & pow2char[ns & 7]) && sectorbordercnt < 255)
-                sectorborder[sectorbordercnt++] = ns;
-            if ((wall[wi].cstat & 48) && maskwallcnt < MAXWALLSB)
+            walltype& w = wall[wi];
+
+            if ((w.cstat & 48) && maskwallcnt < MAXWALLSB)
                 maskwall[maskwallcnt++] = static_cast<short>(wi);
+
+            const short ns = w.nextsector;
+            if (ns >= 0 && ns < numsectors && !(w.cstat & 32))
+            {
+                buildgl::BuildMostSpan span;
+                if (!buildgl::mostProjectPortal(s, wi, span))
+                    continue;
+
+                if (!buildgl::mostRangeStillVisible(span))
+                    continue;
+
+                // The portal was visible at this point, so its sector may be
+                // visible. Then shrink umost/dmost by the solid upper/lower
+                // wall pieces so later walls/sectors cannot draw through it.
+                if (!(gotsector[ns >> 3] & pow2char[ns & 7]) && sectorbordercnt < 255)
+                    sectorborder[sectorbordercnt++] = ns;
+
+                buildgl::mostClipToPortalOpening(span);
+            }
+            else
+            {
+                // Do not close solid walls into the global umost/dmost during
+                // scansector(). This pass is only for discovering which sectors
+                // can be seen through portal openings. Actual solid wall depth
+                // is handled by the 3D draw, and closing here makes visibility
+                // order-dependent, which causes flicker.
+            }
         }
     }
 }
+
 
 extern "C" int wallfront(long l1, long l2)
 {
