@@ -1165,26 +1165,56 @@ namespace buildgl
     }
 
 #ifndef BUILDGL_FOG_DENSITY_DIVISOR
-#define BUILDGL_FOG_DENSITY_DIVISOR 131072.0f
+    // The renderer scales BUILD X/Y map units down by 1024 before OpenGL sees them.
+    // Fog therefore needs a much stronger world-space density than the previous
+    // 262144 divisor. 65536 makes sector visibility changes visible at normal
+    // Duke-sized room distances without instantly blanketing default sectors.
+#define BUILDGL_FOG_DENSITY_DIVISOR 65536.0f
+#endif
+#ifndef BUILDGL_FOG_STRENGTH
+// Extra user-facing multiplier for quick tuning. Raise to 1.5f/2.0f if you
+// want heavier fog globally, or lower it if stock maps become too hazy.
+#define BUILDGL_FOG_STRENGTH 1.0f
 #endif
 #ifndef BUILDGL_FOG_MAX_DENSITY
-#define BUILDGL_FOG_MAX_DENSITY 0.08f
+#define BUILDGL_FOG_MAX_DENSITY 0.45f
 #endif
+#ifndef BUILDGL_FOG_MODE
+// GL_EXP gives visible room-scale falloff; GL_EXP2 was too weak up close with
+// this port's scaled coordinates.
+#define BUILDGL_FOG_MODE GL_EXP
+#endif
+
+    static long combinedVisibilityForSector(short sectnum)
+    {
+        // sector[].visibility is an 8-bit BUILD visibility modifier, not an
+        // absolute fog-density override. A sector value of 0 means normal
+        // visibility because the classic factor is (visibility + 16).
+        const long baseVisibility = max(0L, visibility);
+        unsigned char sectorFactor = 16;
+
+        if (sectnum >= 0 && sectnum < numsectors)
+        {
+            const int sectorVis = static_cast<signed char>(sector[sectnum].visibility);
+            sectorFactor = static_cast<unsigned char>(sectorVis + 16);
+        }
+
+        return baseVisibility * static_cast<long>(sectorFactor);
+    }
 
     static float fogDensityForSector(short sectnum)
     {
-        if (visibility <= 0) return 0.0f;
+        const long combinedVisibility = combinedVisibilityForSector(sectnum);
+        if (combinedVisibility <= 0) return 0.0f;
 
-        long v = visibility;
-        if (sectnum >= 0 && sectnum < numsectors)
-        {
-            const long sectorVis = static_cast<unsigned char>(sector[sectnum].visibility);
-            if (sectorVis != 0)
-                v = sectorVis << 4;
-        }
-
-        if (v <= 0) return 0.0f;
-        return clampFloat(static_cast<float>(v) / BUILDGL_FOG_DENSITY_DIVISOR, 0.0f, BUILDGL_FOG_MAX_DENSITY);
+        // BUILD map coordinates are scaled down before reaching OpenGL, so the
+        // old palette-lookup visibility value must be converted to GL-world
+        // density. This default keeps normal Duke visibility visible at room
+        // distance while letting sector visibility values noticeably thicken or
+        // clear the fog.
+        const float density = (static_cast<float>(combinedVisibility) / BUILDGL_FOG_DENSITY_DIVISOR) *
+            BUILDGL_FOG_STRENGTH;
+        return clampFloat(density, 0.0f, BUILDGL_FOG_MAX_DENSITY);
     }
 
     static void applySectorFog(short sectnum)
@@ -1204,7 +1234,7 @@ namespace buildgl
             1.0f
         };
         glEnable(GL_FOG);
-        glFogi(GL_FOG_MODE, GL_EXP2);
+        glFogi(GL_FOG_MODE, BUILDGL_FOG_MODE);
         glFogfv(GL_FOG_COLOR, fogColor);
         glFogf(GL_FOG_DENSITY, density);
         glHint(GL_FOG_HINT, GL_DONT_CARE);
@@ -1885,6 +1915,9 @@ namespace buildgl
         if ((unsigned short)pic >= MAXTILES) pic = 0;
         if (picanm[pic] & 192) pic = static_cast<short>(pic + animateoffs(pic, sectnum));
         bindTile(pic);
+        glDisable(GL_ALPHA_TEST);
+        glDisable(GL_BLEND);
+        glDepthMask(GL_TRUE);
         glColorShade((ceiling ? sec.ceilingshade : sec.floorshade));
 
         auto loops = collectLoops(sectnum);
@@ -1932,16 +1965,49 @@ namespace buildgl
         long refTop1, long refTop2, long refBot1, long refBot2)
     {
         if (zBot1 <= zTop1 && zBot2 <= zTop2) return;
-        if ((unsigned short)pic >= MAXTILES) pic = 0;
-        if (picanm[pic] & 192) pic = static_cast<short>(pic + animateoffs(pic, static_cast<short>(&w - wall + 16384)));
+
+        // For masked walls, an invalid overpicnum means "nothing to draw". Do
+        // not silently draw tile 0, because that makes failed masks look like
+        // random opaque quads.
+        if ((unsigned short)pic >= MAXTILES)
+        {
+            if (transparent) return;
+            pic = 0;
+        }
+
+        if (picanm[pic] & 192)
+            pic = static_cast<short>(pic + animateoffs(pic, static_cast<short>(&w - wall + 16384)));
+
+        if ((unsigned short)pic >= MAXTILES)
+        {
+            if (transparent) return;
+            pic = 0;
+        }
+
         bindTile(pic);
 
-        if (transparent)
+        const bool maskedPass = transparent;
+        const bool translucent = maskedPass && ((w.cstat & 128) != 0);
+
+        if (maskedPass)
+        {
+            glEnable(GL_ALPHA_TEST);
+            glAlphaFunc(GL_GREATER, 0.05f);
+        }
+        else
+        {
+            // Palette index 255 is only transparent for masked walls/sprites.
+            // On normal walls/floors it should render as black, so do not leave
+            // alpha testing enabled from a previous masked draw.
+            glDisable(GL_ALPHA_TEST);
+        }
+
+        if (translucent)
         {
             glEnable(GL_BLEND);
             glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
             glDepthMask(GL_FALSE);
-            glColorShade(shade, 0.62f);
+            glColorShade(shade, (w.cstat & 512) ? 0.33f : 0.66f);
         }
         else
         {
@@ -1955,8 +2021,7 @@ namespace buildgl
 
         // BUILD's wall U coordinate is driven by xrepeat<<3 across the wall,
         // not by world-space wall length. The map editor stores xrepeat as the
-        // already-adjusted texture scale. Multiplying by wall length here made
-        // nearly every wall texture drift or tile at the wrong rate.
+        // already-adjusted texture scale.
         float u0 = static_cast<float>(w.xpanning);
         float u1 = u0 + xrep * 8.0f;
         if (w.cstat & 8) std::swap(u0, u1);
@@ -1967,9 +2032,8 @@ namespace buildgl
         if (w.cstat & 4)
         {
             // Bottom-aligned walls stay pinned to the full wall bottom. This is
-            // important for lower portal bands cut by sloped floors: the texture
-            // must be clipped out of the same wall texture space, not stretched
-            // from V=0 to the visible band height at each endpoint.
+            // especially important for masked portal walls: only the visible
+            // portal opening should be clipped, not stretched.
             vTop1 = static_cast<float>(w.ypanning) - static_cast<float>(refBot1 - zTop1) * vScale;
             vTop2 = static_cast<float>(w.ypanning) - static_cast<float>(refBot2 - zTop2) * vScale;
             vBot1 = static_cast<float>(w.ypanning) - static_cast<float>(refBot1 - zBot1) * vScale;
@@ -1977,10 +2041,6 @@ namespace buildgl
         }
         else
         {
-            // Top-aligned walls are similarly anchored to the sector's full wall
-            // top. A lower wall band under a sloped neighboring floor therefore
-            // samples the correct lower part of the wall texture instead of
-            // restarting at the top of the texture on the sloped cut.
             vTop1 = static_cast<float>(w.ypanning) + static_cast<float>(zTop1 - refTop1) * vScale;
             vTop2 = static_cast<float>(w.ypanning) + static_cast<float>(zTop2 - refTop2) * vScale;
             vBot1 = static_cast<float>(w.ypanning) + static_cast<float>(zBot1 - refTop1) * vScale;
@@ -2000,7 +2060,11 @@ namespace buildgl
         texWall(pic, u0, vBot1); vertexBuild(x1, y1, zBot1);
         glEnd();
 
-        if (transparent) { glDepthMask(GL_TRUE); glDisable(GL_BLEND); }
+        if (translucent)
+        {
+            glDepthMask(GL_TRUE);
+            glDisable(GL_BLEND);
+        }
     }
 
     static bool haveScannedSectors()
@@ -2026,23 +2090,52 @@ namespace buildgl
         return (gotsector[sectnum >> 3] & pow2char[sectnum & 7]) != 0;
     }
 
-    static bool wallFacesCamera(int wallnum)
+    static std::int64_t wallSideCross(int wallnum, long x, long y)
+    {
+        if (wallnum < 0 || wallnum >= numwalls)
+            return 0;
+
+        const walltype& w = wall[wallnum];
+        if (w.point2 < 0 || w.point2 >= numwalls)
+            return 0;
+
+        const walltype& w2 = wall[w.point2];
+        const std::int64_t dx = static_cast<std::int64_t>(w2.x) - static_cast<std::int64_t>(w.x);
+        const std::int64_t dy = static_cast<std::int64_t>(w2.y) - static_cast<std::int64_t>(w.y);
+        return dx * static_cast<std::int64_t>(y - w.y) -
+            dy * static_cast<std::int64_t>(x - w.x);
+    }
+
+    static bool cameraOnWallSectorSide(int wallnum, short wallsect)
     {
         if (wallnum < 0 || wallnum >= numwalls)
             return false;
 
         const walltype& w = wall[wallnum];
-        if (w.point2 < 0 || w.point2 >= numwalls)
-            return false;
 
-        const walltype& w2 = wall[w.point2];
-        const long dx = w2.x - w.x;
-        const long dy = w2.y - w.y;
+        // Prefer sector membership when available. It removes the ambiguity at
+        // exact vertices/edges and picks the correct texture side for normal
+        // two-sided masked walls.
+        if (wallsect >= 0 && wallsect < numsectors)
+        {
+            if (globalcursectnum == wallsect) return true;
+            if (inside(globalposx, globalposy, wallsect) == 1) return true;
+        }
 
-        // This matches the original BUILD-style 2D side test. If a specific
-        // project has the one-way mask visible from the opposite side, flip the
-        // comparison below from >= to <=.
-        return dmulscale32(dx, globalposy - w.y, -(globalposx - w.x), dy) >= 0;
+        if (w.nextsector >= 0 && w.nextsector < numsectors)
+        {
+            if (globalcursectnum == w.nextsector) return false;
+            if (inside(globalposx, globalposy, w.nextsector) == 1) return false;
+        }
+
+        // Fall back to a full 64-bit side test. dmulscale32() throws away too
+        // much precision for short/near walls and randomly flips one-way masks.
+        return wallSideCross(wallnum, globalposx, globalposy) >= 0;
+    }
+
+    static bool wallFacesCamera(int wallnum)
+    {
+        return wallSideCross(wallnum, globalposx, globalposy) >= 0;
     }
 
     static bool hasParallaxCeiling(short sectnum)
@@ -2057,6 +2150,10 @@ namespace buildgl
 
     static void renderWalls(bool transparent)
     {
+        std::vector<unsigned char> maskedDone;
+        if (transparent)
+            maskedDone.assign(static_cast<size_t>(max<long>(numwalls, 0L)), 0);
+
         for (short si = 0; si < numsectors; ++si)
         {
             if (!sectorScanned(si))
@@ -2075,37 +2172,87 @@ namespace buildgl
                 if (w.point2 < 0 || w.point2 >= numwalls) continue;
                 walltype& w2 = wall[w.point2];
 
+                const bool hasNext = (w.nextsector >= 0 && w.nextsector < numsectors);
+                const bool masked = hasNext && ((w.cstat & 16) != 0);
+
+                if (transparent)
+                {
+                    if (!masked) continue;
+                    if (!maskedDone.empty() && maskedDone[static_cast<size_t>(wi)]) continue;
+
+                    const bool pairedMasked = (w.nextwall >= 0 && w.nextwall < numwalls &&
+                        (wall[w.nextwall].cstat & 16) != 0);
+
+                    if (!maskedDone.empty())
+                    {
+                        maskedDone[static_cast<size_t>(wi)] = 1;
+                        if (pairedMasked)
+                            maskedDone[static_cast<size_t>(w.nextwall)] = 1;
+                    }
+
+                    int drawWi = wi;
+                    short drawSect = si;
+
+                    // For a normal two-sided masked wall, draw exactly the side
+                    // facing the camera. Drawing both sides causes equal-depth
+                    // z fighting and often overwrites the correct overpicnum.
+                    if (pairedMasked && !cameraOnWallSectorSide(wi, si))
+                    {
+                        drawWi = w.nextwall;
+                        drawSect = w.nextsector;
+                    }
+
+                    walltype& mw = wall[drawWi];
+                    if ((mw.cstat & 16) == 0) continue;
+                    if (mw.point2 < 0 || mw.point2 >= numwalls) continue;
+                    if (mw.nextsector < 0 || mw.nextsector >= numsectors) continue;
+
+                    if ((mw.cstat & 32) && !cameraOnWallSectorSide(drawWi, drawSect))
+                        continue;
+
+                    walltype& mw2 = wall[mw.point2];
+                    const short nextSect = mw.nextsector;
+
+                    const long c1 = slopeZ(drawSect, mw.x, mw.y, true);
+                    const long c2 = slopeZ(drawSect, mw2.x, mw2.y, true);
+                    const long f1 = slopeZ(drawSect, mw.x, mw.y, false);
+                    const long f2 = slopeZ(drawSect, mw2.x, mw2.y, false);
+                    const long nc1 = slopeZ(nextSect, mw.x, mw.y, true);
+                    const long nc2 = slopeZ(nextSect, mw2.x, mw2.y, true);
+                    const long nf1 = slopeZ(nextSect, mw.x, mw.y, false);
+                    const long nf2 = slopeZ(nextSect, mw2.x, mw2.y, false);
+
+                    const long top1 = max(c1, nc1);
+                    const long top2 = max(c2, nc2);
+                    const long bot1 = min(f1, nf1);
+                    const long bot2 = min(f2, nf2);
+                    if (bot1 <= top1 && bot2 <= top2) continue;
+
+                    applySectorFog(drawSect);
+                    const long maskShade = static_cast<long>(sector[drawSect].floorshade) +
+                        static_cast<long>(mw.shade);
+
+                    short maskPic = mw.overpicnum;
+                    if ((unsigned short)maskPic >= MAXTILES && pairedMasked)
+                    {
+                        const int otherWi = (drawWi == wi) ? w.nextwall : wi;
+                        if (otherWi >= 0 && otherWi < numwalls &&
+                            (unsigned short)wall[otherWi].overpicnum < MAXTILES)
+                            maskPic = wall[otherWi].overpicnum;
+                    }
+
+                    drawWallSpan(mw, mw.x, mw.y, mw2.x, mw2.y,
+                        top1, top2, bot1, bot2,
+                        maskPic, maskShade, true,
+                        c1, c2, f1, f2);
+                    continue;
+                }
+
                 const long c1 = slopeZ(si, w.x, w.y, true);
                 const long c2 = slopeZ(si, w2.x, w2.y, true);
                 const long f1 = slopeZ(si, w.x, w.y, false);
                 const long f2 = slopeZ(si, w2.x, w2.y, false);
-                const bool hasNext = (w.nextsector >= 0 && w.nextsector < numsectors);
-                const bool oneWay = (w.cstat & 32) != 0;
-                const bool masked = hasNext && ((w.cstat & 16) != 0);
-
                 const long shade = static_cast<long>(sec.floorshade) + static_cast<long>(w.shade);
-
-                if (transparent)
-                {
-                    // Masked portal wall. One-way masks are drawn only from the
-                    // side that should see the mask instead of becoming opaque
-                    // solid walls in the main pass.
-                    if (masked && (!oneWay || wallFacesCamera(wi)))
-                    {
-                        short n = w.nextsector;
-                        long nc1 = slopeZ(n, w.x, w.y, true);
-                        long nc2 = slopeZ(n, w2.x, w2.y, true);
-                        long nf1 = slopeZ(n, w.x, w.y, false);
-                        long nf2 = slopeZ(n, w2.x, w2.y, false);
-                        drawWallSpan(w, w.x, w.y, w2.x, w2.y,
-                            max(c1, nc1), max(c2, nc2),
-                            min(f1, nf1), min(f2, nf2),
-                            w.overpicnum, shade, true,
-                            max(c1, nc1), max(c2, nc2),
-                            min(f1, nf1), min(f2, nf2));
-                    }
-                    continue;
-                }
 
                 // A wall with no nextsector is a true solid wall. A portal wall
                 // with cstat bit 32 is a one-way masked wall, not a full-height
@@ -2207,6 +2354,8 @@ namespace buildgl
 
         std::sort(items.begin(), items.end(), [](const Item& a, const Item& b) { return a.dist2 > b.dist2; });
 
+        glEnable(GL_ALPHA_TEST);
+        glAlphaFunc(GL_GREATER, 0.05f);
         glEnable(GL_BLEND);
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
         glDepthMask(GL_FALSE);
@@ -2348,7 +2497,7 @@ namespace buildgl
 
         glEnable(GL_DEPTH_TEST);
         glEnable(GL_TEXTURE_2D);
-        glEnable(GL_ALPHA_TEST);
+        glDisable(GL_ALPHA_TEST);
         glDisable(GL_BLEND);
         glDisable(GL_FOG);
         glDepthMask(GL_TRUE);
