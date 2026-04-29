@@ -1045,6 +1045,15 @@ namespace buildgl
     // GL height as its BUILD Z extent (64*64*4).
 #define BUILDGL_Z_SCALE_DIVISOR 16384.0f
 #endif
+#ifndef BUILDGL_CLOSE_MAP_UNITS
+// Keep the renderer close plane in BUILD map units, then convert it to GL
+// units for gluPerspective(). A fixed GL near value of 0.05 clips at about
+// 51 BUILD XY units when BUILDGL_XY_SCALE_DIVISOR is 1024.
+#define BUILDGL_CLOSE_MAP_UNITS 4.0
+#endif
+#ifndef BUILDGL_FAR_PLANE
+#define BUILDGL_FAR_PLANE 10000.0
+#endif
 #ifndef BUILDGL_HORIZONTAL_FOV_DEGREES
 // gluPerspective() wants vertical FOV. Classic BUILD/Duke-style tuning is much
 // closer to a ~90 degree horizontal FOV; using 90 as vertical FOV made the view
@@ -2456,7 +2465,13 @@ namespace buildgl
         // transparent. cstat 32 by itself is a one-way wall that uses
         // overpicnum too, but it is solid: index 255 should draw black.
         const bool maskedPass = transparent && ((w.cstat & 16) != 0);
-        const bool translucent = maskedPass && ((w.cstat & 128) != 0);
+
+        // BUILD forcefields are usually masked portal overlays: cstat 16 for
+        // masked pixels plus cstat 32 for one-way/portal behavior, often without
+        // cstat 128. Treat that case as translucent for GL state purposes so it
+        // does not write depth over the floor/walls behind the portal.
+        const bool forcefieldLikePortal = maskedPass && ((w.cstat & 32) != 0);
+        const bool translucent = maskedPass && (((w.cstat & 128) != 0) || forcefieldLikePortal);
 
         if (maskedPass)
         {
@@ -2684,9 +2699,13 @@ namespace buildgl
         short maskPic = mw.overpicnum;
         unsigned char maskPal = static_cast<unsigned char>(mw.pal);
 
+        short pairedCstat = mw.cstat;
+
         if (mw.nextwall >= 0 && mw.nextwall < numwalls)
         {
             const walltype& other = wall[mw.nextwall];
+            pairedCstat |= other.cstat;
+
             if ((other.cstat & 48) && validMaskedPic(other.overpicnum) &&
                 (!validMaskedPic(maskPic) || (maskPic == 0 && other.overpicnum != 0)))
             {
@@ -2699,10 +2718,13 @@ namespace buildgl
         if (!validMaskedPic(maskPic))
             return;
 
+        walltype maskDrawWall = *maskTexWall;
+        maskDrawWall.cstat = static_cast<short>(maskDrawWall.cstat | (pairedCstat & (16 | 32 | 128 | 512)));
+
         applySectorFog(drawSect);
         const long maskShade = static_cast<long>(sector[drawSect].floorshade) + static_cast<long>(maskTexWall->shade);
 
-        drawWallSpan(*maskTexWall, mw.x, mw.y, mw2.x, mw2.y,
+        drawWallSpan(maskDrawWall, mw.x, mw.y, mw2.x, mw2.y,
             top1, top2, bot1, bot2,
             maskPic, maskPal, maskShade, true,
             c1, c2, f1, f2);
@@ -3085,7 +3107,8 @@ namespace buildgl
         glLoadIdentity();
         const double aspect = static_cast<double>(vw) / static_cast<double>(max(1, vh));
         const double verticalFov = computeVerticalFovDegrees(aspect);
-        gluPerspective(verticalFov, aspect, 0.05, 10000.0);
+        const double glNearPlane = max(0.0005, static_cast<double>(BUILDGL_CLOSE_MAP_UNITS) * static_cast<double>(XY_SCALE));
+        gluPerspective(verticalFov, aspect, glNearPlane, static_cast<double>(BUILDGL_FAR_PLANE));
 
         glMatrixMode(GL_MODELVIEW);
         glLoadIdentity();
@@ -3183,6 +3206,16 @@ namespace buildgl
     }
 
 
+
+    // -------------------------------------------------------------------------
+    // BUILD-style per-column sector visibility clipping.
+    //
+    // The original software renderer and Polymost do not decide visibility by a
+    // plain flood-fill over every nextsector. They keep an upper/lower visible
+    // screen span for every column (umost/dmost, or Polymost's VSP equivalent),
+    // update those spans as solid wall pieces occlude them, and only recurse
+    // through a portal if that portal still has at least one open column.
+    // -------------------------------------------------------------------------
     struct BuildMostSpan
     {
         bool valid = false;
@@ -3196,7 +3229,37 @@ namespace buildgl
         int ncy1 = 0;
         int nfy0 = 0;
         int nfy1 = 0;
+
+        // Map-space endpoints after clipping the wall to the renderer close
+        // plane. Polymost samples getzsofslope() at these clipped n0/n1
+        // positions. Sampling at the original wall endpoints makes the portal
+        // opening wrong when a wall crosses the near plane.
+        double mx0 = 0.0;
+        double my0 = 0.0;
+        double mx1 = 0.0;
+        double my1 = 0.0;
+        double depth0 = 1.0;
+        double depth1 = 1.0;
     };
+
+    struct MostState
+    {
+        std::array<short, MAXXDIM> u{};
+        std::array<short, MAXXDIM> d{};
+    };
+
+#ifndef BUILDGL_CLOSE_PORTAL_MAP_UNITS
+    // Polymost has a "Scan close sectors" escape hatch so walls/portals right
+    // next to the camera do not collapse to a bogus projected span. This value
+    // is in BUILD map units. Raise slightly if very-close door/subway portals
+    // still drop their neighbor sector; lower it if it admits too much overdraw.
+#define BUILDGL_CLOSE_PORTAL_MAP_UNITS 64.0
+#endif
+
+    static int mostActiveWidth()
+    {
+        return min<int>(static_cast<int>(max(1L, xdim)), MAXXDIM);
+    }
 
     static int mostClampY(double y)
     {
@@ -3226,19 +3289,24 @@ namespace buildgl
         const double ca = static_cast<double>(cosglobalang) / 16384.0;
         const double sa = static_cast<double>(singlobalang) / 16384.0;
 
-        auto toView = [&](long x, long y, double& vx, double& vy)
+        auto toView = [&](double x, double y, double& vx, double& vy)
             {
-                const double dx = static_cast<double>(x - globalposx);
-                const double dy = static_cast<double>(y - globalposy);
+                const double dx = x - static_cast<double>(globalposx);
+                const double dy = y - static_cast<double>(globalposy);
                 vx = dy * ca - dx * sa;
                 vy = dx * ca + dy * sa;
             };
 
-        double vx0 = 0.0, vy0 = 0.0, vx1 = 0.0, vy1 = 0.0;
-        toView(w.x, w.y, vx0, vy0);
-        toView(w2.x, w2.y, vx1, vy1);
+        double mx0 = static_cast<double>(w.x);
+        double my0 = static_cast<double>(w.y);
+        double mx1 = static_cast<double>(w2.x);
+        double my1 = static_cast<double>(w2.y);
 
-        const double nearPlane = 16.0;
+        double vx0 = 0.0, vy0 = 0.0, vx1 = 0.0, vy1 = 0.0;
+        toView(mx0, my0, vx0, vy0);
+        toView(mx1, my1, vx1, vy1);
+
+        const double nearPlane = max(1.0, static_cast<double>(BUILDGL_CLOSE_MAP_UNITS));
         if (vy0 <= nearPlane && vy1 <= nearPlane)
             return false;
 
@@ -3247,50 +3315,60 @@ namespace buildgl
             const double t = (nearPlane - vy0) / (vy1 - vy0);
             vx0 += (vx1 - vx0) * t;
             vy0 = nearPlane;
+            mx0 += (mx1 - mx0) * t;
+            my0 += (my1 - my0) * t;
         }
         if (vy1 <= nearPlane)
         {
             const double t = (nearPlane - vy1) / (vy0 - vy1);
             vx1 += (vx0 - vx1) * t;
             vy1 = nearPlane;
+            mx1 += (mx0 - mx1) * t;
+            my1 += (my0 - my1) * t;
         }
 
-        // Same BUILD projection shape used by classic/Polymost: x is lateral / depth.
         const double halfW = static_cast<double>(halfxdimen > 0 ? halfxdimen : (xdim >> 1));
         const double screenScale = halfW * (static_cast<double>(viewingrange) / 65536.0);
-        double sx0 = halfW + (vx0 * screenScale) / max(1.0, vy0);
-        double sx1 = halfW + (vx1 * screenScale) / max(1.0, vy1);
+        const double sx0 = halfW + (vx0 * screenScale) / max(1.0, vy0);
+        const double sx1 = halfW + (vx1 * screenScale) / max(1.0, vy1);
 
         if (sx1 <= sx0)
             return false;
 
-        int x0 = static_cast<int>(std::floor(sx0));
-        int x1 = static_cast<int>(std::ceil(sx1));
-        if (x1 < 0 || x0 >= xdim)
-            return false;
-
-        x0 = max(0, x0);
-        x1 = min<int>(static_cast<int>(xdim - 1), x1);
-        if (x1 <= x0)
+        const int ix0 = static_cast<int>(std::floor(sx0));
+        const int ix1 = static_cast<int>(std::ceil(sx1));
+        const int width = mostActiveWidth();
+        if (ix1 < 0 || ix0 >= width || ix1 <= ix0)
             return false;
 
         auto screenY = [&](long z, double depth) -> int
             {
-                // BUILD Z grows downward. Convert z relative to the camera into a
-                // projected screen Y using the same sign convention as classic: the
-                // ceiling is smaller screen-Y, the floor is larger screen-Y.
                 const double relz = static_cast<double>(z - globalposz);
                 const double y = static_cast<double>(globalhoriz) + (relz * (static_cast<double>(yxaspect) / 65536.0)) / max(1.0, depth);
                 return mostClampY(y * (static_cast<double>(ydim) / 200.0));
             };
 
+        const long smx0 = static_cast<long>(std::llround(mx0));
+        const long smy0 = static_cast<long>(std::llround(my0));
+        const long smx1 = static_cast<long>(std::llround(mx1));
+        const long smy1 = static_cast<long>(std::llround(my1));
+
         out.valid = true;
-        out.x0 = x0;
-        out.x1 = x1;
-        out.cy0 = screenY(slopeZ(sectnum, w.x, w.y, true), vy0);
-        out.cy1 = screenY(slopeZ(sectnum, w2.x, w2.y, true), vy1);
-        out.fy0 = screenY(slopeZ(sectnum, w.x, w.y, false), vy0);
-        out.fy1 = screenY(slopeZ(sectnum, w2.x, w2.y, false), vy1);
+        // Keep unclamped screen X endpoints. The per-column loops clamp to the
+        // framebuffer, but the y interpolation must still use the true projected
+        // wall endpoints; otherwise off-screen portals get the wrong umost/dmost.
+        out.x0 = ix0;
+        out.x1 = ix1;
+        out.mx0 = mx0;
+        out.my0 = my0;
+        out.mx1 = mx1;
+        out.my1 = my1;
+        out.depth0 = max(1.0, vy0);
+        out.depth1 = max(1.0, vy1);
+        out.cy0 = screenY(slopeZ(sectnum, smx0, smy0, true), out.depth0);
+        out.cy1 = screenY(slopeZ(sectnum, smx1, smy1, true), out.depth1);
+        out.fy0 = screenY(slopeZ(sectnum, smx0, smy0, false), out.depth0);
+        out.fy1 = screenY(slopeZ(sectnum, smx1, smy1, false), out.depth1);
         out.ncy0 = out.cy0;
         out.ncy1 = out.cy1;
         out.nfy0 = out.fy0;
@@ -3304,27 +3382,9 @@ namespace buildgl
             return false;
 
         const walltype& w = wall[wi];
-        if (w.point2 < 0 || w.point2 >= numwalls)
-            return false;
-
         const short nextsect = w.nextsector;
         if (nextsect < 0 || nextsect >= numsectors)
             return false;
-
-        const walltype& w2 = wall[w.point2];
-
-        const double ca = static_cast<double>(cosglobalang) / 16384.0;
-        const double sa = static_cast<double>(singlobalang) / 16384.0;
-
-        auto depthOnly = [&](long x, long y) -> double
-            {
-                const double dx = static_cast<double>(x - globalposx);
-                const double dy = static_cast<double>(y - globalposy);
-                return dx * ca + dy * sa;
-            };
-
-        double d0 = max(16.0, depthOnly(w.x, w.y));
-        double d1 = max(16.0, depthOnly(w2.x, w2.y));
 
         auto screenY = [&](long z, double depth) -> int
             {
@@ -3333,24 +3393,164 @@ namespace buildgl
                 return mostClampY(y * (static_cast<double>(ydim) / 200.0));
             };
 
-        out.ncy0 = screenY(slopeZ(nextsect, w.x, w.y, true), d0);
-        out.ncy1 = screenY(slopeZ(nextsect, w2.x, w2.y, true), d1);
-        out.nfy0 = screenY(slopeZ(nextsect, w.x, w.y, false), d0);
-        out.nfy1 = screenY(slopeZ(nextsect, w2.x, w2.y, false), d1);
+        const long mx0 = static_cast<long>(std::llround(out.mx0));
+        const long my0 = static_cast<long>(std::llround(out.my0));
+        const long mx1 = static_cast<long>(std::llround(out.mx1));
+        const long my1 = static_cast<long>(std::llround(out.my1));
+
+        out.ncy0 = screenY(slopeZ(nextsect, mx0, my0, true), out.depth0);
+        out.ncy1 = screenY(slopeZ(nextsect, mx1, my1, true), out.depth1);
+        out.nfy0 = screenY(slopeZ(nextsect, mx0, my0, false), out.depth0);
+        out.nfy1 = screenY(slopeZ(nextsect, mx1, my1, false), out.depth1);
         return true;
     }
 
-    static bool mostRangeStillVisible(const BuildMostSpan& span)
+    static void mostLoadState(const MostState& state)
+    {
+        const int width = mostActiveWidth();
+        for (int x = 0; x < width; ++x)
+        {
+            umost[x] = state.u[x];
+            dmost[x] = state.d[x];
+        }
+    }
+
+    static int mostCountOpenColumns(const MostState& state)
+    {
+        int count = 0;
+        const int width = mostActiveWidth();
+        for (int x = 0; x < width; ++x)
+            if (state.u[x] < state.d[x])
+                ++count;
+        return count;
+    }
+
+    static bool mostRangeStillVisible(const MostState& state, const BuildMostSpan& span)
     {
         if (!span.valid)
             return false;
 
-        for (int x = span.x0; x <= span.x1; ++x)
+        const int width = mostActiveWidth();
+        const int x0 = max(0, span.x0);
+        const int x1 = min(width - 1, span.x1);
+        if (x1 < x0)
+            return false;
+
+        for (int x = x0; x <= x1; ++x)
         {
-            if (x >= 0 && x < MAXXDIM && umost[x] < dmost[x])
+            if (state.u[x] >= state.d[x])
+                continue;
+
+            const int cy = mostLerpInt(span.cy0, span.cy1, x, span.x0, span.x1);
+            const int fy = mostLerpInt(span.fy0, span.fy1, x, span.x0, span.x1);
+            const int ncy = mostLerpInt(span.ncy0, span.ncy1, x, span.x0, span.x1);
+            const int nfy = mostLerpInt(span.nfy0, span.nfy1, x, span.x0, span.x1);
+
+            const int openTop = max<int>(state.u[x], max(cy, ncy));
+            const int openBot = min<int>(state.d[x], min(fy, nfy));
+            if (openTop < openBot)
                 return true;
         }
         return false;
+    }
+
+    static bool mostBuildChildThroughPortal(const MostState& parent, const BuildMostSpan& span, MostState& child)
+    {
+        const int width = mostActiveWidth();
+        for (int x = 0; x < width; ++x)
+        {
+            child.u[x] = 0;
+            child.d[x] = 0;
+        }
+
+        if (!span.valid)
+            return false;
+
+        const int x0 = max(0, span.x0);
+        const int x1 = min(width - 1, span.x1);
+        if (x1 < x0)
+            return false;
+
+        bool any = false;
+        for (int x = x0; x <= x1; ++x)
+        {
+            if (parent.u[x] >= parent.d[x])
+                continue;
+
+            const int cy = mostLerpInt(span.cy0, span.cy1, x, span.x0, span.x1);
+            const int fy = mostLerpInt(span.fy0, span.fy1, x, span.x0, span.x1);
+            const int ncy = mostLerpInt(span.ncy0, span.ncy1, x, span.x0, span.x1);
+            const int nfy = mostLerpInt(span.nfy0, span.nfy1, x, span.x0, span.x1);
+
+            // The child sector is only visible through the overlap of the
+            // parent's current span and this portal's ceiling/floor opening.
+            // Closing every column outside the portal is the missing bit in the
+            // original drop-in scan; otherwise a sector reached through a tiny
+            // subway doorway can continue scanning/drawing as if it were visible
+            // full-screen.
+            const int openTop = max<int>(parent.u[x], max(cy, ncy));
+            const int openBot = min<int>(parent.d[x], min(fy, nfy));
+
+            if (openTop < openBot)
+            {
+                child.u[x] = static_cast<short>(openTop);
+                child.d[x] = static_cast<short>(openBot);
+                any = true;
+            }
+        }
+
+        return any;
+    }
+
+    static void mostCopyState(const MostState& src, MostState& dst)
+    {
+        const int width = mostActiveWidth();
+        for (int x = 0; x < width; ++x)
+        {
+            dst.u[x] = src.u[x];
+            dst.d[x] = src.d[x];
+        }
+    }
+
+    static bool mostPortalIsCloseToView(int wi)
+    {
+        if (wi < 0 || wi >= numwalls)
+            return false;
+
+        const walltype& w = wall[wi];
+        if (w.point2 < 0 || w.point2 >= numwalls)
+            return false;
+
+        const walltype& w2 = wall[w.point2];
+        const double x0 = static_cast<double>(w.x - globalposx);
+        const double y0 = static_cast<double>(w.y - globalposy);
+        const double x1 = static_cast<double>(w2.x - globalposx);
+        const double y1 = static_cast<double>(w2.y - globalposy);
+        const double dx = x1 - x0;
+        const double dy = y1 - y0;
+        const double len2 = dx * dx + dy * dy;
+        if (len2 <= 1.0)
+            return false;
+
+        const double t = -((x0 * dx + y0 * dy) / len2);
+        if (t < -0.25 || t > 1.25)
+            return false;
+
+        const double cross = x0 * y1 - x1 * y0;
+        const double closeDist = static_cast<double>(BUILDGL_CLOSE_PORTAL_MAP_UNITS);
+        return (cross * cross) <= (len2 * closeDist * closeDist);
+    }
+
+    static bool mostWallIsMaskedPortalPair(int wi)
+    {
+        if (wi < 0 || wi >= numwalls)
+            return false;
+
+        short combined = wall[wi].cstat;
+        if (wall[wi].nextwall >= 0 && wall[wi].nextwall < numwalls)
+            combined = static_cast<short>(combined | wall[wall[wi].nextwall].cstat);
+
+        return (combined & 16) != 0;
     }
 
     static void mostClipToPortalOpening(const BuildMostSpan& span)
@@ -3358,20 +3558,15 @@ namespace buildgl
         if (!span.valid)
             return;
 
-        for (int x = span.x0; x <= span.x1 && x < MAXXDIM; ++x)
+        const int width = mostActiveWidth();
+        const int x0 = max(0, span.x0);
+        const int x1 = min(width - 1, span.x1);
+        for (int x = x0; x <= x1; ++x)
         {
-            if (x < 0) continue;
-
             const int cy = mostLerpInt(span.cy0, span.cy1, x, span.x0, span.x1);
             const int fy = mostLerpInt(span.fy0, span.fy1, x, span.x0, span.x1);
             const int ncy = mostLerpInt(span.ncy0, span.ncy1, x, span.x0, span.x1);
             const int nfy = mostLerpInt(span.nfy0, span.nfy1, x, span.x0, span.x1);
-
-            // Portal opening is the overlap of this sector and the neighbor.
-            // Do not close unrelated solid spans during sector discovery here;
-            // doing that makes the scan order decide visibility and causes
-            // frame-to-frame flicker when another portal would have provided a
-            // wider opening to the same sector.
             const int openTop = max(cy, ncy);
             const int openBot = min(fy, nfy);
 
@@ -3392,24 +3587,32 @@ namespace buildgl
         if (!mostProjectWallBase(sectnum, wi, span))
             return;
 
-        for (int x = span.x0; x <= span.x1 && x < MAXXDIM; ++x)
+        const int width = mostActiveWidth();
+        const int x0 = max(0, span.x0);
+        const int x1 = min(width - 1, span.x1);
+        for (int x = x0; x <= x1; ++x)
+            umost[x] = dmost[x];
+    }
+
+    static void mostInitFullScreen(MostState& state)
+    {
+        const int width = mostActiveWidth();
+        const short bottom = static_cast<short>(max(0L, ydim - 1));
+        for (int x = 0; x < width; ++x)
         {
-            if (x >= 0)
-                umost[x] = dmost[x];
+            state.u[x] = 0;
+            state.d[x] = bottom;
+            umost[x] = state.u[x];
+            dmost[x] = state.d[x];
+            startumost[x] = umost[x];
+            startdmost[x] = dmost[x];
         }
     }
 
     static void mostInitFullScreen()
     {
-        const int maxX = min<int>(static_cast<int>(xdim), MAXXDIM);
-        const short bottom = static_cast<short>(max(0L, ydim - 1));
-        for (int x = 0; x < maxX; ++x)
-        {
-            umost[x] = 0;
-            dmost[x] = bottom;
-            startumost[x] = umost[x];
-            startdmost[x] = dmost[x];
-        }
+        MostState state;
+        mostInitFullScreen(state);
     }
 
 } // namespace buildgl
@@ -3775,29 +3978,50 @@ extern "C" void scansector(short sectnum)
     spritesortcnt = 0;
     maskwallcnt = 0;
 
-    buildgl::mostInitFullScreen();
-
-    sectorborder[0] = sectnum;
-    sectorbordercnt = 1;
-
-    while (sectorbordercnt > 0)
+    struct SectorMostNode
     {
-        short s = sectorborder[--sectorbordercnt];
+        short sect = -1;
+        buildgl::MostState most;
+    };
+
+    std::deque<SectorMostNode> queue;
+    std::vector<int> bestOpen(static_cast<size_t>(max<long>(numsectors, 0L)), -1);
+
+    SectorMostNode first;
+    first.sect = sectnum;
+    buildgl::mostInitFullScreen(first.most);
+    bestOpen[static_cast<size_t>(sectnum)] = buildgl::mostCountOpenColumns(first.most);
+    queue.push_back(first);
+
+    int guard = 0;
+    const int guardLimit = max<int>(MAXSECTORS * 8, 1024);
+
+    while (!queue.empty() && guard++ < guardLimit)
+    {
+        SectorMostNode node = queue.front();
+        queue.pop_front();
+
+        short s = node.sect;
         if (s < 0 || s >= numsectors) continue;
-        if (gotsector[s >> 3] & pow2char[s & 7]) continue;
 
-        gotsector[s >> 3] |= pow2char[s & 7];
-        show2dsector[s >> 3] |= pow2char[s & 7];
+        buildgl::mostLoadState(node.most);
 
-        for (short spr = headspritesect[s]; spr >= 0; spr = nextspritesect[spr])
+        const bool firstVisit = (gotsector[s >> 3] & pow2char[s & 7]) == 0;
+        if (firstVisit)
         {
-            if (spritesortcnt < MAXSPRITESONSCREEN &&
-                sprite[spr].xrepeat > 0 && sprite[spr].yrepeat > 0 &&
-                (((sprite[spr].cstat & 0x8000) == 0) || showinvisibility))
+            gotsector[s >> 3] |= pow2char[s & 7];
+            show2dsector[s >> 3] |= pow2char[s & 7];
+
+            for (short spr = headspritesect[s]; spr >= 0; spr = nextspritesect[spr])
             {
-                tsprite[spritesortcnt] = sprite[spr];
-                tsprite[spritesortcnt].owner = spr;
-                ++spritesortcnt;
+                if (spritesortcnt < MAXSPRITESONSCREEN &&
+                    sprite[spr].xrepeat > 0 && sprite[spr].yrepeat > 0 &&
+                    (((sprite[spr].cstat & 0x8000) == 0) || showinvisibility))
+                {
+                    tsprite[spritesortcnt] = sprite[spr];
+                    tsprite[spritesortcnt].owner = spr;
+                    ++spritesortcnt;
+                }
             }
         }
 
@@ -3809,39 +4033,64 @@ extern "C" void scansector(short sectnum)
         {
             walltype& w = wall[wi];
 
-            if ((w.cstat & 48) && maskwallcnt < MAXWALLSB)
+            if (firstVisit && (w.cstat & 48) && maskwallcnt < MAXWALLSB)
                 maskwall[maskwallcnt++] = static_cast<short>(wi);
 
             const short ns = w.nextsector;
-            if (ns >= 0 && ns < numsectors && !(w.cstat & 32))
+
+            // cstat 32 by itself is a one-way/blocking portal for visibility,
+            // but cstat 16|32 is the common BUILD masked/forcefield case. Some
+            // maps put the masked bit on the opposite red-wall side, so check
+            // the pair rather than only this wall.
+            const bool maskedPortal = buildgl::mostWallIsMaskedPortalPair(wi);
+            const bool oneWayBlockingPortal = ((w.cstat & 32) != 0) && !maskedPortal;
+
+            if (ns >= 0 && ns < numsectors && !oneWayBlockingPortal)
             {
-                buildgl::BuildMostSpan span;
-                if (!buildgl::mostProjectPortal(s, wi, span))
+                SectorMostNode child;
+                child.sect = ns;
+
+                if (buildgl::mostPortalIsCloseToView(wi))
+                {
+                    // Polymost floods very-close nextsectors because their
+                    // projected x-span is numerically unstable. Do the same, but
+                    // keep the inherited most state path-local.
+                    buildgl::mostCopyState(node.most, child.most);
+                }
+                else
+                {
+                    buildgl::BuildMostSpan span;
+                    if (!buildgl::mostProjectPortal(s, wi, span))
+                        continue;
+
+                    if (!buildgl::mostRangeStillVisible(node.most, span))
+                        continue;
+
+                    if (!buildgl::mostBuildChildThroughPortal(node.most, span, child.most))
+                        continue;
+                }
+
+                const int openCount = buildgl::mostCountOpenColumns(child.most);
+                if (openCount <= 0)
                     continue;
 
-                if (!buildgl::mostRangeStillVisible(span))
-                    continue;
-
-                // The portal was visible at this point, so its sector may be
-                // visible. Then shrink umost/dmost by the solid upper/lower
-                // wall pieces so later walls/sectors cannot draw through it.
-                if (!(gotsector[ns >> 3] & pow2char[ns & 7]) && sectorbordercnt < 255)
-                    sectorborder[sectorbordercnt++] = ns;
-
-                buildgl::mostClipToPortalOpening(span);
+                int& best = bestOpen[static_cast<size_t>(ns)];
+                if (openCount > best + 2 && static_cast<int>(queue.size()) < guardLimit)
+                {
+                    best = openCount;
+                    queue.push_back(child);
+                }
             }
             else
             {
-                // Do not close solid walls into the global umost/dmost during
-                // scansector(). This pass is only for discovering which sectors
-                // can be seen through portal openings. Actual solid wall depth
-                // is handled by the 3D draw, and closing here makes visibility
-                // order-dependent, which causes flicker.
+                // Actual solid wall occlusion is handled by the 3D depth pass.
+                // Closing solid spans in this pre-scan would make visibility
+                // depend on wall order, which Polymost avoids by drawing sorted
+                // bunches and mutating its VSP during drawing.
             }
         }
     }
 }
-
 
 extern "C" int wallfront(long l1, long l2)
 {
