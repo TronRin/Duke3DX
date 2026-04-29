@@ -1578,6 +1578,8 @@ void coolgaugetext(short snum)
 
     p = &ps[snum];
 
+    pus = 1;  // jamrshall
+
     if (p->invdisptime > 0) displayinventory(p);
 
 

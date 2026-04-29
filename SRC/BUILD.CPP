@@ -3146,23 +3146,11 @@ namespace buildgl
         if (g.w <= 0 || g.h <= 0)
             syncClientSize(static_cast<int>(max(1L, xdim)), static_cast<int>(max(1L, ydim)), true);
 
-#if defined(BUILDGL_RESPECT_SET_VIEWPORT) && BUILDGL_RESPECT_SET_VIEWPORT
         int vx = static_cast<int>(windowx1);
         int vy = static_cast<int>(g.h - (windowy1 + max(1L, windowy2 - windowy1 + 1)));
         int vw = static_cast<int>(max(1L, windowx2 - windowx1 + 1));
         int vh = static_cast<int>(max(1L, windowy2 - windowy1 + 1));
-#else
-        // The original BUILD software renderer changes setview() for temporary
-        // tile rendering and HUD layouts. This GL drop-in does not render to
-        // those software buffers, so using windowx1/windowy1 here can trap both
-        // 3D and subsequent 2D drawing in a tiny tile-sized viewport. Default to
-        // the full Win32 client area. Define BUILDGL_RESPECT_SET_VIEWPORT=1 if
-        // your game explicitly wants the old sub-window behavior.
-        int vx = 0;
-        int vy = 0;
-        int vw = max(1, g.w);
-        int vh = max(1, g.h);
-#endif
+
 
         glViewport(static_cast<GLint>(vx), static_cast<GLint>(vy), vw, vh);
         glClearColor(0.02f, 0.025f, 0.035f, 1.0f);
@@ -3228,7 +3216,8 @@ namespace buildgl
         if (!g.ready) createWindow(static_cast<int>(xdim), static_cast<int>(ydim), "Duke Nukem 3D");
         wglMakeCurrent(g.hdc, g.hglrc);
 
-        glPushAttrib(GL_VIEWPORT_BIT | GL_ENABLE_BIT | GL_DEPTH_BUFFER_BIT | GL_COLOR_BUFFER_BIT);
+        glPushAttrib(GL_VIEWPORT_BIT | GL_ENABLE_BIT | GL_DEPTH_BUFFER_BIT |
+            GL_COLOR_BUFFER_BIT | GL_SCISSOR_BIT);
         glViewport(0, 0, max(1, g.w), max(1, g.h));
 
         glMatrixMode(GL_PROJECTION);
@@ -6079,59 +6068,154 @@ extern "C" void rotatesprite(long sx, long sy, long z, short a, short picnum, si
     dorotatesprite(sx, sy, z, a, picnum, dashade, dapalnum, dastat, cx1, cy1, cx2, cy2);
 }
 
-extern "C" void dorotatesprite(long sx, long sy, long z, short a, short picnum, signed char dashade, char dapalnum, char dastat, long cx1, long cy1, long cx2, long cy2)
+extern "C" void dorotatesprite(long sx, long sy, long z, short a, short picnum,
+    signed char dashade, char dapalnum, char dastat,
+    long cx1, long cy1, long cx2, long cy2)
 {
-    if ((unsigned short)picnum >= MAXTILES || z <= 0) return;
-    if (picanm[picnum] & 192) picnum = static_cast<short>(picnum + animateoffs(picnum, static_cast<short>(0xc000)));
-    if ((unsigned short)picnum >= MAXTILES) picnum = 0;
+    if ((unsigned short)picnum >= MAXTILES || z <= 16) return;
+
+    if (picanm[picnum] & 192)
+        picnum = static_cast<short>(picnum + animateoffs(picnum, static_cast<short>(0xc000)));
+
+    if ((unsigned short)picnum >= MAXTILES) return;
+    if (tilesizx[picnum] <= 0 || tilesizy[picnum] <= 0) return;
     if (!buildgl::bindTilePal(picnum, static_cast<unsigned char>(dapalnum), false)) return;
 
-    float x = static_cast<float>(sx) / 65536.0f;
-    float y = static_cast<float>(sy) / 65536.0f;
-    float scalez = static_cast<float>(z) / 65536.0f;
-    float w = static_cast<float>(tilesizx[picnum]) * scalez;
-    float h = static_cast<float>(tilesizy[picnum]) * scalez;
-    if ((dastat & 2) != 0)
+    const long xsiz = tilesizx[picnum];
+    const long ysiz = tilesizy[picnum];
+
+    long xoff = 0;
+    long yoff = 0;
+
+    // Build does not simply center every rotatesprite tile.
+    // It uses picanm x/y offsets unless dastat&16 says sx/sy is top-left.
+    if ((dastat & 16) == 0)
     {
-        x = x * static_cast<float>(xdim) / 320.0f;
-        y = y * static_cast<float>(ydim) / 200.0f;
-        w = w * static_cast<float>(xdim) / 320.0f;
-        h = h * static_cast<float>(ydim) / 200.0f;
+        xoff = static_cast<long>(static_cast<signed char>((picanm[picnum] >> 8) & 255)) + (xsiz >> 1);
+        yoff = static_cast<long>(static_cast<signed char>((picanm[picnum] >> 16) & 255)) + (ysiz >> 1);
     }
 
-    float ox = (dastat & 16) ? 0.0f : w * 0.5f;
-    float oy = (dastat & 16) ? 0.0f : h * 0.5f;
-    float rad = static_cast<float>(buildgl::radFromBuildAngle(a));
-    float ca = std::cos(rad), sa = std::sin(rad);
-    float pts[4][2] = { {-ox,-oy},{w - ox,-oy},{w - ox,h - oy},{-ox,h - oy} };
+    // Build y-flip changes the anchor too, not just the texture coordinates.
+    if (dastat & 4)
+        yoff = ysiz - yoff;
+
+    long cosang = sintable[(a + 512) & 2047];
+    long sinang = sintable[a & 2047];
+
+    // Build auto-scale mode.
+    // This is the part that fixes crosshair movement with + / - screen size.
+    if (dastat & 2)
+    {
+        long xscale;
+
+        if ((dastat & 8) == 0)
+        {
+            // Clip/window-relative mode: center around cx/cy, not full screen.
+            xscale = xdimenscale;
+            if (stereomode)
+                xscale = scale(windowx2 - windowx1 + 1, yxaspect, 320);
+
+            sx = ((cx1 + cx2 + 2) << 15) + scale(sx - (320 << 15), xdimen, 320);
+            sy = ((cy1 + cy2 + 2) << 15) + mulscale16(sy - (200 << 15), xscale);
+        }
+        else
+        {
+            // Full-screen autoscale mode.
+            xscale = scale(xdim, yxaspect, 320);
+            sx = (xdim << 15) + 32768 + scale(sx - (320 << 15), xdim, 320);
+            sy = (ydim << 15) + 32768 + mulscale16(sy - (200 << 15), xscale);
+        }
+
+        z = mulscale16(z, xscale);
+    }
+
+    long xv = mulscale14(cosang, z);
+    long yv = mulscale14(sinang, z);
+    long xv2 = xv;
+    long yv2 = yv;
+
+    // Match Build's aspect correction for autoscaled or view-clipped sprites.
+    if ((dastat & 2) || ((dastat & 8) == 0))
+    {
+        xv2 = mulscale16(xv, xyaspect);
+        yv2 = mulscale16(yv, xyaspect);
+    }
+
+    long rx[4], ry[4];
+
+    rx[0] = sx - (xv2 * xoff - yv2 * yoff);
+    ry[0] = sy - (yv * xoff + xv * yoff);
+
+    rx[1] = rx[0] + xv2 * xsiz;
+    ry[1] = ry[0] + yv * xsiz;
+
+    rx[3] = rx[0] - yv2 * ysiz;
+    ry[3] = ry[0] + xv * ysiz;
+
+    rx[2] = rx[1] + rx[3] - rx[0];
+    ry[2] = ry[1] + ry[3] - ry[0];
+
+    auto fp16 = [](long v) -> float
+        {
+            return static_cast<float>(v) / 65536.0f;
+        };
 
     buildgl::begin2D();
+
+    // Clip to the cx/cy rectangle. This is not a full startumost/startdmost
+    // clone, but it fixes most HUD/crosshair clipping behavior.
+    const bool doScissor = (cx1 <= cx2 && cy1 <= cy2);
+    if (doScissor)
+    {
+        const int scx0 = static_cast<int>(max(0L, min(cx1, xdim - 1)));
+        const int scy0 = static_cast<int>(max(0L, min(cy1, ydim - 1)));
+        const int scx1 = static_cast<int>(max(0L, min(cx2, xdim - 1)));
+        const int scy1 = static_cast<int>(max(0L, min(cy2, ydim - 1)));
+
+        const int scw = max(0, scx1 - scx0 + 1);
+        const int sch = max(0, scy1 - scy0 + 1);
+
+        glEnable(GL_SCISSOR_TEST);
+        glScissor(scx0, max(0, buildgl::g.h - (scy1 + 1)), scw, sch);
+    }
+
+    if (dastat & 64)
+        glDisable(GL_ALPHA_TEST);     // non-masked
+    else
+        glEnable(GL_ALPHA_TEST);      // masked, palette index 255 transparent
+
     if (dastat & 1)
     {
         glEnable(GL_BLEND);
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     }
-    glColor4f(buildgl::shadeFactor(dashade), buildgl::shadeFactor(dashade), buildgl::shadeFactor(dashade), (dastat & 1) ? 0.65f : 1.0f);
+    else
+    {
+        glDisable(GL_BLEND);
+    }
 
-    // rotatesprite() orientation bits are not sprite cstat bits. In classic
-    // BUILD-style HUD calls, bit 4 is vertical/Y flip and bit 8 is no-clip.
-    // The previous GL shim treated bit 8 as Y flip, so common flags such as
-    // 2+8+16 made HUD/status-bar art appear upside down. Keep this change
-    // texture-coordinate-only so it cannot disturb the 3D world renderer.
-    const unsigned int stat = static_cast<unsigned char>(dastat);
-    const bool yflip = (stat & 4u) != 0;
+    const float shade = buildgl::shadeFactor(dashade);
+    glColor4f(shade, shade, shade, (dastat & 1) ? 0.65f : 1.0f);
+
+    const bool yflip = (dastat & 4) != 0;
     const float u0 = 0.0f, u1 = 1.0f;
     const float v0 = yflip ? 1.0f : 0.0f;
     const float v1 = yflip ? 0.0f : 1.0f;
+
     glBegin(GL_QUADS);
-    glTexCoord2f(u0, v0); glVertex2f(x + pts[0][0] * ca - pts[0][1] * sa, y + pts[0][0] * sa + pts[0][1] * ca);
-    glTexCoord2f(u1, v0); glVertex2f(x + pts[1][0] * ca - pts[1][1] * sa, y + pts[1][0] * sa + pts[1][1] * ca);
-    glTexCoord2f(u1, v1); glVertex2f(x + pts[2][0] * ca - pts[2][1] * sa, y + pts[2][0] * sa + pts[2][1] * ca);
-    glTexCoord2f(u0, v1); glVertex2f(x + pts[3][0] * ca - pts[3][1] * sa, y + pts[3][0] * sa + pts[3][1] * ca);
+    glTexCoord2f(u0, v0); glVertex2f(fp16(rx[0]), fp16(ry[0]));
+    glTexCoord2f(u1, v0); glVertex2f(fp16(rx[1]), fp16(ry[1]));
+    glTexCoord2f(u1, v1); glVertex2f(fp16(rx[2]), fp16(ry[2]));
+    glTexCoord2f(u0, v1); glVertex2f(fp16(rx[3]), fp16(ry[3]));
     glEnd();
-    if (dastat & 1) glDisable(GL_BLEND);
+
+    if (doScissor)
+        glDisable(GL_SCISSOR_TEST);
+
+    if (dastat & 1)
+        glDisable(GL_BLEND);
+
     buildgl::end2D();
-    (void)cx1; (void)cy1; (void)cx2; (void)cy2;
 }
 
 extern "C" void printext256(long xpos, long ypos, short col, short backcol, char name[82], char fontsize)
