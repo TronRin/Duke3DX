@@ -176,6 +176,7 @@ char textfont[1024] = {};
 char smalltextfont[1024] = {};
 
 short sintable[2048] = {};
+short radarang[1280 * 2] = { };
 char show2dsector[(MAXSECTORS + 7) >> 3] = {};
 char show2dwall[(MAXWALLS + 7) >> 3] = {};
 char show2dsprite[(MAXSPRITES + 7) >> 3] = {};
@@ -3878,10 +3879,12 @@ extern "C" void loadtables()
     if (fil >= 0)
     {
         kread(fil, sintable, 2048 * 2);
-        // The remaining table data is optional for this GL path.
+
+        kread(fil, radarang, 1280);
+
         kread(fil, textfont, 1024);
         kread(fil, smalltextfont, 1024);
-        kread(fil, britable, 1024);
+        kread(fil, britable, 16 * 64);
         kclose(fil);
     }
 }
@@ -6405,9 +6408,9 @@ extern "C" void setbrightness(char dabrightness, unsigned char* dapal)
         const unsigned char g = buildgl_to_build6(src[i * 3 + 1]);
         const unsigned char b = buildgl_to_build6(src[i * 3 + 2]);
 
-        palette[i * 3 + 0] = r;
-        palette[i * 3 + 1] = g;
-        palette[i * 3 + 2] = b;
+        palette[i * 3 + 0] = britable[curbrightness][r];
+        palette[i * 3 + 1] = britable[curbrightness][g];
+        palette[i * 3 + 2] = britable[curbrightness][b];
     }
 
     paletteloaded = 1;
