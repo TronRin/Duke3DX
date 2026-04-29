@@ -102,7 +102,7 @@ extern "C" {
     EXTERN volatile long totalclock;
     EXTERN long numframes, randomseed;
     EXTERN short sintable[2048];
-    EXTERN char palette[768];
+    EXTERN unsigned char palette[768];
     EXTERN short numpalookups;
     EXTERN char* palookup[MAXPALOOKUPS];
     EXTERN char parallaxtype, showinvisibility;
@@ -140,7 +140,7 @@ extern "C" {
     EXTERN long artversion, mapversion, artsize, cachesize;
     EXTERN char* transluc;
     EXTERN char paletteloaded;
-    EXTERN char britable[16][64];
+    EXTERN unsigned char britable[16][64];
     EXTERN char textfont[1024], smalltextfont[1024];
 
     EXTERN short searchit;
@@ -267,6 +267,8 @@ extern "C" {
     void setvmode(int);
     void limitrate(void);
     void getvalidvesamodes(void);
+    int VBE_setPalette(long start, long num, char* dapal);
+    long FP_OFF(void* source);
 //    unsigned char readpixel(long);
 //    void drawpixel(long, unsigned char);
 //    void koutp(long, long);
@@ -296,7 +298,7 @@ extern "C" {
     int getclosestcol(long r, long g, long b);
     void initfastcolorlookup(long, long, long);
     void makepalookup(long palnum, char* remapbuf, signed char r, signed char g, signed char b, char dastat);
-    void setbrightness(char dabrightness, char* dapal);
+    void setbrightness(char dabrightness, unsigned char* dapal);
     long getpalookup(long davis, long dashade);
     void setviewtotile(short tilenume, long xsiz, long ysiz);
     void setviewback(void);

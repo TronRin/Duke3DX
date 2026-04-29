@@ -76,7 +76,7 @@ int32 CommandSoundToggleOff = 0;
 int32 CommandMusicToggleOff = 0;
 
 char confilename[128] = {"GAME.CON"},boardfilename[128] = {0};
-char waterpal[768], slimepal[768], titlepal[768], drealms[768], endingpal[768];
+unsigned char waterpal[768], slimepal[768], titlepal[768], drealms[768], endingpal[768];
 char firstdemofile[80] = { '\0' };
 
 #define patchstatusbar(x1,y1,x2,y2)                                        \
@@ -2001,7 +2001,7 @@ void gameexit(char *t)
 {
     short i;
 
-    if(*t != 0) ps[myconnectindex].palette = (char *) &palette[0];
+    if(*t != 0) ps[myconnectindex].palette =  &palette[0];
 
     if(numplayers > 1)
     {
@@ -7087,8 +7087,16 @@ void Logo(void)
     for(i=0;i<64;i+=7) palto(0,0,0,i);
     ps[myconnectindex].palette = drealms;
     palto(0,0,0,63);
-    rotatesprite(0,0,65536L,0,DREALMS,0,0,2+8+16+64, 0,0,xdim-1,ydim-1);
-    nextpage(); for(i=63;i>0;i-=7) palto(0,0,0,i);
+
+// jmarshall
+//    rotatesprite(0,0,65536L,0,DREALMS,0,0,2+8+16+64, 0,0,xdim-1,ydim-1);
+//    nextpage(); for(i=63;i>0;i-=7) palto(0,0,0,i);
+    for (i = 63; i > 0; i -= 7) {
+        palto(0, 0, 0, i);
+        rotatesprite(0, 0, 65536L, 0, DREALMS, 0, 0, 2 + 8 + 16 + 64, 0, 0, xdim - 1, ydim - 1);
+        nextpage();
+    }
+// jmarshall end
     totalclock = 0;
     while( totalclock < (120*7) && !KB_KeyWaiting() )
         getpackets();
@@ -7292,7 +7300,7 @@ void Startup(void)
    if(numplayers > 1)
     puts("Multiplayer initialized.");
 
-   ps[myconnectindex].palette = (char *) &palette[0];
+   ps[myconnectindex].palette = &palette[0];
    SetupGameButtons();
 
    if(networkmode == 255)

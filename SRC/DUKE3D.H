@@ -258,7 +258,7 @@ extern long movefifosendplc;
 typedef struct
 {
     char *ptr;
-    volatile char lock;
+    volatile unsigned char lock;
     int  length, num;
 } SAMPLE;
 
@@ -364,7 +364,8 @@ typedef struct player_struct
     char scuba_on,footprintpal,heat_on;
 
     char  holster_weapon,falling_counter;
-    char  gotweapon[MAX_WEAPONS],refresh_inventory,*palette;
+    char  gotweapon[MAX_WEAPONS], refresh_inventory;
+    unsigned char *palette;
 
     char toggle_key_flag,knuckle_incs; // ,select_dir;
     char walking_snd_toggle, palookup, hard_landing;
@@ -481,7 +482,8 @@ extern char restorepalette;
 
 extern short buttonstat;
 extern long cachecount;
-extern char boardfilename[128],waterpal[768],slimepal[768],titlepal[768],drealms[768],endingpal[768];
+extern char boardfilename[128];
+extern unsigned char waterpal[768], slimepal[768], titlepal[768], drealms[768], endingpal[768];
 extern char betaname[80];
 extern char cachedebug,earthquaketime;
 extern char networkmode;

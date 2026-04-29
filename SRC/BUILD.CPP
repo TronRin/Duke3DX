@@ -164,12 +164,14 @@ char tilefilenum[MAXTILES] = {};
 long tilefileoffs[MAXTILES] = {};
 long artversion = 1, mapversion = 7, artsize = 0, cachesize = 0;
 
-char palette[768] = {};
+unsigned char palette[768] = {};
+static unsigned char basepalette[768] = {};
+static bool basepalettevalid = false;
 char* palookup[MAXPALOOKUPS] = {};
 short numpalookups = 32;
 char* transluc = nullptr;
 char paletteloaded = 0;
-char britable[16][64] = {};
+unsigned char britable[16][64] = {};
 char textfont[1024] = {};
 char smalltextfont[1024] = {};
 
@@ -1074,8 +1076,25 @@ namespace buildgl
 // changing the Win32/OpenGL resolution does not stretch the sky texture.
 #define BUILDGL_SKY_VERTICAL_PIXELS 200.0f
 #endif
+#ifndef BUILDGL_FP_OFF_WIDTH
+// Duke3D's classic software frame buffer is 320x200.  Override these at
+// compile time if your fork really uses a 320x220 compatibility surface.
+#define BUILDGL_FP_OFF_WIDTH 320
+#endif
+#ifndef BUILDGL_FP_OFF_HEIGHT
+#define BUILDGL_FP_OFF_HEIGHT 200
+#endif
+#ifndef BUILDGL_FP_OFF_POT_BACKING
+// Keep the visible FP_OFF surface fixed at BUILDGL_FP_OFF_WIDTH x
+// BUILDGL_FP_OFF_HEIGHT.  Set this to 1 only for ancient GL drivers that reject
+// non-power-of-two GL_TEXTURE_2D uploads; texture coordinates will still crop
+// back to the fixed virtual surface.
+#define BUILDGL_FP_OFF_POT_BACKING 0
+#endif
 
     static constexpr float XY_SCALE = 1.0f / BUILDGL_XY_SCALE_DIVISOR;
+    static constexpr int FP_OFF_WIDTH = (BUILDGL_FP_OFF_WIDTH > 0) ? BUILDGL_FP_OFF_WIDTH : 320;
+    static constexpr int FP_OFF_HEIGHT = (BUILDGL_FP_OFF_HEIGHT > 0) ? BUILDGL_FP_OFF_HEIGHT : 200;
     static constexpr float Z_SCALE = 1.0f / BUILDGL_Z_SCALE_DIVISOR;
 
     struct Vec2 { double x, y; };
@@ -1101,6 +1120,20 @@ namespace buildgl
         std::array<std::array<unsigned char, MAXPALOOKUPS>, MAXTILES> texDirty{};
         std::array<unsigned char, MAXTILES> fallbackTile{};
         std::vector<unsigned char> tileData[MAXTILES];
+
+        // Compatibility path for old code that asks for Duke3D's classic
+        // 320x200 linear 8-bit framebuffer through FP_OFF().  When FP_OFF() is
+        // called, that fixed virtual surface is considered dirty for this frame,
+        // converted through the current BUILD palette, uploaded, and drawn as
+        // the last full-screen pass immediately before SwapBuffers().
+        std::vector<unsigned char> fpOffBuffer;
+        std::vector<unsigned char> fpOffRgba;
+        unsigned char* fpOffSource = nullptr;
+        GLuint fpOffTex = 0;
+        bool fpOffTexReady = false;
+        bool fpOffDirtyThisFrame = false;
+        int fpOffTexW = 0;
+        int fpOffTexH = 0;
     } g;
 
     static void syncClientSize(int width, int height, bool resetView)
@@ -1577,6 +1610,37 @@ namespace buildgl
     {
         for (short tile = 0; tile < MAXTILES; ++tile)
             markTileDirty(tile);
+    }
+
+    static void purgeTextureCache()
+    {
+        if (g.ready && g.hdc && g.hglrc)
+            wglMakeCurrent(g.hdc, g.hglrc);
+
+        for (int tile = 0; tile < MAXTILES; ++tile)
+        {
+            for (int pal = 0; pal < MAXPALOOKUPS; ++pal)
+            {
+                if (g.texReady[tile][pal])
+                {
+                    GLuint t = g.tex[tile][pal];
+                    if (g.ready && t != 0) glDeleteTextures(1, &t);
+                    g.tex[tile][pal] = 0;
+                    g.texReady[tile][pal] = 0;
+                }
+                g.texDirty[tile][pal] = 1;
+            }
+        }
+
+        if (g.fpOffTexReady)
+        {
+            GLuint t = g.fpOffTex;
+            if (g.ready && t != 0) glDeleteTextures(1, &t);
+            g.fpOffTex = 0;
+            g.fpOffTexReady = false;
+            g.fpOffTexW = 0;
+            g.fpOffTexH = 0;
+        }
     }
 
     // Duke3D palette swaps live in LOOKUP.DAT, not in PALETTE.DAT's shade
@@ -3190,6 +3254,162 @@ namespace buildgl
         glPopAttrib();
     }
 
+    static int nextPowerOfTwo(int v)
+    {
+        int p = 1;
+        v = max(1, v);
+        while (p < v && p < 16384) p <<= 1;
+        return p;
+    }
+
+    static int fpOffTextureWidth()
+    {
+#if BUILDGL_FP_OFF_POT_BACKING
+        return nextPowerOfTwo(FP_OFF_WIDTH);
+#else
+        return FP_OFF_WIDTH;
+#endif
+    }
+
+    static int fpOffTextureHeight()
+    {
+#if BUILDGL_FP_OFF_POT_BACKING
+        return nextPowerOfTwo(FP_OFF_HEIGHT);
+#else
+        return FP_OFF_HEIGHT;
+#endif
+    }
+
+    static unsigned char* ensureFpOffBuffer()
+    {
+        const size_t bytes = static_cast<size_t>(FP_OFF_WIDTH) * static_cast<size_t>(FP_OFF_HEIGHT);
+
+        unsigned char* oldOwned = g.fpOffBuffer.empty() ? nullptr : g.fpOffBuffer.data();
+        if (g.fpOffBuffer.size() != bytes)
+            g.fpOffBuffer.assign(bytes, 0);
+
+        if (!g.fpOffSource || g.fpOffSource == oldOwned)
+            g.fpOffSource = g.fpOffBuffer.data();
+
+        return g.fpOffBuffer.data();
+    }
+
+    static long fpOffCompatibility(void* source)
+    {
+        unsigned char* owned = ensureFpOffBuffer();
+        g.fpOffDirtyThisFrame = true;
+
+        // Keep normal FP_OFF(ptr) semantics for callers that already own a
+        // 320x200 Duke-style framebuffer, while FP_OFF(NULL) returns this
+        // port's owned 320x200 compatibility framebuffer. The upload pass
+        // samples FP_OFF_WIDTH bytes per row.
+        if (source)
+        {
+            g.fpOffSource = static_cast<unsigned char*>(source);
+            return BUILDGL_PTR_TO_LONG(source);
+        }
+
+        g.fpOffSource = owned;
+        return BUILDGL_PTR_TO_LONG(owned);
+    }
+
+    static void uploadFpOffOverlayTexture()
+    {
+        if (!g.fpOffDirtyThisFrame) return;
+
+        const int sw = FP_OFF_WIDTH;
+        const int sh = FP_OFF_HEIGHT;
+        const int tw = fpOffTextureWidth();
+        const int th = fpOffTextureHeight();
+        const size_t texPixels = static_cast<size_t>(tw) * static_cast<size_t>(th);
+        const unsigned char* src = g.fpOffSource ? g.fpOffSource : ensureFpOffBuffer();
+
+        if (g.fpOffRgba.size() != texPixels * 4)
+            g.fpOffRgba.assign(texPixels * 4, 0);
+        else
+            std::memset(g.fpOffRgba.data(), 0, g.fpOffRgba.size());
+
+        for (int y = 0; y < sh; ++y)
+        {
+            const unsigned char* srow = src + static_cast<size_t>(y) * static_cast<size_t>(sw);
+            unsigned char* drow = g.fpOffRgba.data() + (static_cast<size_t>(y) * static_cast<size_t>(tw) * 4);
+            for (int x = 0; x < sw; ++x)
+            {
+                const unsigned char idx = srow[x];
+                unsigned char* d = drow + static_cast<size_t>(x) * 4;
+                d[0] = static_cast<unsigned char>(static_cast<unsigned char>(palette[idx * 3 + 0]) << 2);
+                d[1] = static_cast<unsigned char>(static_cast<unsigned char>(palette[idx * 3 + 1]) << 2);
+                d[2] = static_cast<unsigned char>(static_cast<unsigned char>(palette[idx * 3 + 2]) << 2);
+                d[3] = 255;
+            }
+        }
+
+        if (!g.fpOffTexReady)
+        {
+            glGenTextures(1, &g.fpOffTex);
+            g.fpOffTexReady = true;
+            g.fpOffTexW = 0;
+            g.fpOffTexH = 0;
+        }
+
+        glBindTexture(GL_TEXTURE_2D, g.fpOffTex);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP);
+
+        if (g.fpOffTexW != tw || g.fpOffTexH != th)
+        {
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, tw, th, 0, GL_RGBA, GL_UNSIGNED_BYTE, g.fpOffRgba.data());
+            g.fpOffTexW = tw;
+            g.fpOffTexH = th;
+        }
+        else
+        {
+            glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, tw, th, GL_RGBA, GL_UNSIGNED_BYTE, g.fpOffRgba.data());
+        }
+    }
+
+    static void drawFpOffOverlayIfDirty()
+    {
+        if (!g.fpOffDirtyThisFrame || !g.ready) return;
+
+        wglMakeCurrent(g.hdc, g.hglrc);
+        uploadFpOffOverlayTexture();
+        if (!g.fpOffTexReady)
+        {
+            g.fpOffDirtyThisFrame = false;
+            return;
+        }
+
+        const float umax = static_cast<float>(FP_OFF_WIDTH) / static_cast<float>(max(1, g.fpOffTexW));
+        const float vmax = static_cast<float>(FP_OFF_HEIGHT) / static_cast<float>(max(1, g.fpOffTexH));
+
+        begin2D();
+        glDisable(GL_DEPTH_TEST);
+        glDisable(GL_ALPHA_TEST);
+        glDisable(GL_BLEND);
+        glDisable(GL_FOG);
+        glDepthMask(GL_FALSE);
+        glEnable(GL_TEXTURE_2D);
+        glBindTexture(GL_TEXTURE_2D, g.fpOffTex);
+        glTexEnvf(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
+        glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
+
+        glBegin(GL_QUADS);
+        glTexCoord2f(0.0f, 0.0f); glVertex2f(0.0f, 0.0f);
+        glTexCoord2f(umax, 0.0f); glVertex2f(static_cast<float>(max(1, g.w)), 0.0f);
+        glTexCoord2f(umax, vmax); glVertex2f(static_cast<float>(max(1, g.w)), static_cast<float>(max(1, g.h)));
+        glTexCoord2f(0.0f, vmax); glVertex2f(0.0f, static_cast<float>(max(1, g.h)));
+        glEnd();
+
+        glTexEnvf(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+        glDepthMask(GL_TRUE);
+        end2D();
+
+        g.fpOffDirtyThisFrame = false;
+    }
+
     static void draw2DLine(long x1, long y1, long x2, long y2, unsigned char col)
     {
         begin2D();
@@ -3620,14 +3840,35 @@ namespace buildgl
 // -----------------------------------------------------------------------------
 // Engine initialization, file/data loading.
 // -----------------------------------------------------------------------------
+static unsigned char buildgl_to_build6(unsigned char v)
+{
+    // BUILD palettes are normally 0..63. Accept 0..255 input too.
+    return static_cast<unsigned char>((v > 63) ? (v >> 2) : v);
+}
+
+static unsigned short buildgl_read_u16le(const unsigned char b[2])
+{
+    return static_cast<unsigned short>(b[0] | (static_cast<unsigned short>(b[1]) << 8));
+}
+
+static void buildgl_make_identity_palookup(char* table, long shades)
+{
+    if (!table || shades <= 0) return;
+
+    for (long s = 0; s < shades; ++s)
+        for (int i = 0; i < 256; ++i)
+            table[(s << 8) + i] = static_cast<char>(i);
+}
+
+// -----------------------------------------------------------------------------
 extern "C" void initksqrt()
 {
     for (int i = 0; i < 2048; ++i)
         sintable[i] = static_cast<short>(std::lround(std::sin((i * 2.0 * buildgl::PI) / 2048.0) * 16384.0));
 
-    for (int b = 0; b < 16; ++b)
-        for (int i = 0; i < 64; ++i)
-            britable[b][i] = static_cast<char>(min(63, (i * (b + 1)) / 16));
+    //    for (int b = 0; b < 16; ++b)
+    //        for (int i = 0; i < 64; ++i)
+    //            britable[b][i] = static_cast<char>(min(63, (i * (b + 1)) / 16));
 }
 
 extern "C" void loadtables()
@@ -3651,37 +3892,72 @@ extern "C" void loadpalette()
 
     buildgl::resetLookupPalettes();
 
-    // Fallback VGA-ish grayscale/colored palette.
+    // Fallback palette. Keep it in basepalette so brightness never compounds.
     for (int i = 0; i < 256; ++i)
     {
-        palette[i * 3 + 0] = static_cast<char>((i >> 0) & 63);
-        palette[i * 3 + 1] = static_cast<char>((i >> 1) & 63);
-        palette[i * 3 + 2] = static_cast<char>((i >> 2) & 63);
+        basepalette[i * 3 + 0] = static_cast<unsigned char>((i >> 0) & 63);
+        basepalette[i * 3 + 1] = static_cast<unsigned char>((i >> 1) & 63);
+        basepalette[i * 3 + 2] = static_cast<unsigned char>((i >> 2) & 63);
     }
+
+    std::memcpy(palette, basepalette, sizeof(palette));
+    basepalettevalid = true;
+    bool loadedPaletteDat = false;
 
     short fil = kopen4load((char*)"palette.dat", 0);
     if (fil >= 0)
     {
-        kread(fil, palette, 768);
-        kread(fil, &numpalookups, 2);
-        numpalookups = min(max(numpalookups, 1L), static_cast<long>(MAXPALOOKUPS));
-        if (!palookup[0]) palookup[0] = static_cast<char*>(std::malloc(static_cast<size_t>(numpalookups) << 8));
-        if (palookup[0]) kread(fil, palookup[0], numpalookups << 8);
-        if (!transluc) transluc = static_cast<char*>(std::malloc(65536));
-        if (transluc) kread(fil, transluc, 65536);
+        unsigned char shadeCountLE[2] = {};
+
+        if (kread(fil, basepalette, 768) == 768 &&
+            kread(fil, shadeCountLE, 2) == 2)
+        {
+            std::memcpy(palette, basepalette, sizeof(palette));
+            basepalettevalid = true;
+            loadedPaletteDat = true;
+
+            numpalookups = static_cast<short>(buildgl_read_u16le(shadeCountLE));
+            numpalookups = static_cast<short>(
+                min(max(static_cast<long>(numpalookups), 1L), static_cast<long>(MAXPALOOKUPS))
+                );
+
+            if (!palookup[0])
+                palookup[0] = static_cast<char*>(std::malloc(static_cast<size_t>(numpalookups) << 8));
+
+            if (palookup[0])
+            {
+                const long want = static_cast<long>(numpalookups) << 8;
+                if (kread(fil, palookup[0], want) != want)
+                    buildgl_make_identity_palookup(palookup[0], numpalookups);
+            }
+
+            if (!transluc)
+                transluc = static_cast<char*>(std::malloc(65536));
+
+            if (transluc)
+            {
+                if (kread(fil, transluc, 65536) != 65536)
+                    std::memset(transluc, 0, 65536);
+            }
+        }
+
         kclose(fil);
     }
-    else
-    {
+
+    if (!loadedPaletteDat)
         numpalookups = 32;
+
+    if (!palookup[0])
         palookup[0] = static_cast<char*>(std::malloc(static_cast<size_t>(numpalookups) << 8));
-        if (palookup[0])
-        {
-            for (long s = 0; s < numpalookups; ++s)
-                for (int i = 0; i < 256; ++i)
-                    palookup[0][(s << 8) + i] = static_cast<char>(i);
-        }
-    }
+
+    if (palookup[0] && !loadedPaletteDat)
+        buildgl_make_identity_palookup(palookup[0], numpalookups);
+
+    if (!transluc)
+        transluc = static_cast<char*>(std::malloc(65536));
+
+    if (transluc && !loadedPaletteDat)
+        std::memset(transluc, 0, 65536);
 
     buildgl::loadLookupDatPalettes();
     buildgl::markAllTexturesDirty();
@@ -3882,6 +4158,19 @@ extern "C" int saveboard(char* filename, long* daposx, long* daposy, long* dapos
 // -----------------------------------------------------------------------------
 // Rendering entry points: original names, OpenGL-injected bodies.
 // -----------------------------------------------------------------------------
+#ifdef FP_OFF
+#undef FP_OFF
+#endif
+extern "C" long FP_OFF(void* source)
+{
+    return buildgl::fpOffCompatibility(source);
+}
+
+extern "C" long BUILDGL_FP_OFF_BUFFER()
+{
+    return buildgl::fpOffCompatibility(nullptr);
+}
+
 extern "C" int setgamemode(char davidoption, long daxdim, long daydim)
 {
     (void)davidoption;
@@ -3927,6 +4216,20 @@ extern "C" void uninitengine()
             buildgl::g.texDirty[i][pal] = 1;
         }
     }
+
+    if (buildgl::g.fpOffTexReady)
+    {
+        GLuint t = buildgl::g.fpOffTex;
+        glDeleteTextures(1, &t);
+        buildgl::g.fpOffTex = 0;
+        buildgl::g.fpOffTexReady = false;
+        buildgl::g.fpOffTexW = 0;
+        buildgl::g.fpOffTexH = 0;
+    }
+    buildgl::g.fpOffBuffer.clear();
+    buildgl::g.fpOffRgba.clear();
+    buildgl::g.fpOffSource = nullptr;
+    buildgl::g.fpOffDirtyThisFrame = false;
 
     buildgl::destroy();
     for (int i = 0; i < MAXPALOOKUPS; ++i)
@@ -4135,6 +4438,7 @@ extern "C" void nextpage()
     faketimerhandler();
     if (!buildgl::g.ready) return;
     if (buildgl::g.frameActive && !buildgl::g.maskedDrawn) buildgl::renderMasks();
+    buildgl::drawFpOffOverlayIfDirty();
     SwapBuffers(buildgl::g.hdc);
     buildgl::g.frameActive = false;
     if ((totalclock >= lastageclock + 8) || (totalclock < lastageclock))
@@ -5980,18 +6284,75 @@ extern "C" void squarerotatetile(short tilenume)
 
 extern "C" int getclosestcol(long r, long g, long b)
 {
-    int best = 0; long bestd = 0x7fffffff;
+    const unsigned char* srcpal = basepalettevalid ? basepalette : palette;
+
+    int best = 0;
+    long bestd = 0x7fffffff;
+
     for (int i = 0; i < 256; ++i)
     {
-        long dr = static_cast<long>(palette[i * 3 + 0]) - r;
-        long dg = static_cast<long>(palette[i * 3 + 1]) - g;
-        long db = static_cast<long>(palette[i * 3 + 2]) - b;
+        long dr = static_cast<long>(srcpal[i * 3 + 0]) - r;
+        long dg = static_cast<long>(srcpal[i * 3 + 1]) - g;
+        long db = static_cast<long>(srcpal[i * 3 + 2]) - b;
         long d = dr * dr + dg * dg + db * db;
-        if (d < bestd) { bestd = d; best = i; }
+
+        if (d < bestd)
+        {
+            bestd = d;
+            best = i;
+        }
     }
+
     return best;
 }
+
 extern "C" void initfastcolorlookup(long, long, long) {}
+
+extern "C" int VBE_setPalette(long start, long num, char* dapal)
+{
+    if (!dapal || start < 0 || num <= 0 || start >= 256) return 0;
+    if (start + num > 256) num = 256 - start;
+
+    const unsigned char* srcBase = reinterpret_cast<const unsigned char*>(dapal);
+
+    for (long i = 0; i < num; ++i)
+    {
+        const long idx = start + i;
+        const unsigned char* src = srcBase + (i << 2);
+
+        // RGBQUAD/BGRx layout: byte 0 = blue, byte 1 = green,
+        // byte 2 = red, byte 3 = unused.
+        palette[idx * 3 + 0] = buildgl_to_build6(src[2]);
+        palette[idx * 3 + 1] = buildgl_to_build6(src[1]);
+        palette[idx * 3 + 2] = buildgl_to_build6(src[0]);
+    }
+
+    paletteloaded = 1;
+    buildgl::purgeTextureCache();
+    return 1;
+}
+
+extern "C" int VBE_getPalette(long start, long num, char* dapal)
+{
+    if (!dapal || start < 0 || num <= 0 || start >= 256) return 0;
+    if (start + num > 256) num = 256 - start;
+
+    unsigned char* dstBase = reinterpret_cast<unsigned char*>(dapal);
+
+    for (long i = 0; i < num; ++i)
+    {
+        const long idx = start + i;
+        unsigned char* dst = dstBase + (i << 2);
+
+        // Return BGRx, matching VBE_setPalette input.
+        dst[0] = static_cast<unsigned char>(palette[idx * 3 + 2]);
+        dst[1] = static_cast<unsigned char>(palette[idx * 3 + 1]);
+        dst[2] = static_cast<unsigned char>(palette[idx * 3 + 0]);
+        dst[3] = 0;
+    }
+
+    return 1;
+}
 
 extern "C" void makepalookup(long palnum, char* remapbuf, signed char r, signed char g, signed char b, char dastat)
 {
@@ -6004,12 +6365,15 @@ extern "C" void makepalookup(long palnum, char* remapbuf, signed char r, signed 
         buildgl::installIdentityLookupPalette(palnum);
         return;
     }
+    const unsigned char* srcpal = basepalettevalid ? basepalette : palette;
+
     for (long s = 0; s < numpalookups; ++s)
         for (int i = 0; i < 256; ++i)
         {
-            int ri = static_cast<unsigned char>(palette[static_cast<unsigned char>(remapbuf[i]) * 3 + 0]);
-            int gi = static_cast<unsigned char>(palette[static_cast<unsigned char>(remapbuf[i]) * 3 + 1]);
-            int bi = static_cast<unsigned char>(palette[static_cast<unsigned char>(remapbuf[i]) * 3 + 2]);
+            const unsigned char remapped = static_cast<unsigned char>(remapbuf[i]);
+            int ri = static_cast<unsigned char>(srcpal[remapped * 3 + 0]);
+            int gi = static_cast<unsigned char>(srcpal[remapped * 3 + 1]);
+            int bi = static_cast<unsigned char>(srcpal[remapped * 3 + 2]);
             if (r | g | b)
             {
                 ri = ri + ((r - ri) * s) / max(1L, numpalookups);
@@ -6025,12 +6389,31 @@ extern "C" void makepalookup(long palnum, char* remapbuf, signed char r, signed 
     buildgl::installLookupPalette(static_cast<unsigned char>(palnum), remapRow);
 }
 
-extern "C" void setbrightness(char dabrightness, char* dapal)
+extern "C" void setbrightness(char dabrightness, unsigned char* dapal)
 {
-    (void)dapal;
     curbrightness = min(max(static_cast<long>(dabrightness), 0L), 15L);
-    buildgl::markAllTexturesDirty();
+
+    // Classic callers often pass palette itself. Do NOT read from palette[]
+    // while also overwriting it, or brightness changes compound permanently.
+    const unsigned char* src = dapal;
+    if (!src || src == palette)
+        src = basepalettevalid ? basepalette : palette;
+
+    for (int i = 0; i < 256; ++i)
+    {
+        const unsigned char r = buildgl_to_build6(src[i * 3 + 0]);
+        const unsigned char g = buildgl_to_build6(src[i * 3 + 1]);
+        const unsigned char b = buildgl_to_build6(src[i * 3 + 2]);
+
+        palette[i * 3 + 0] = r;
+        palette[i * 3 + 1] = g;
+        palette[i * 3 + 2] = b;
+    }
+
+    paletteloaded = 1;
+    buildgl::purgeTextureCache();
 }
+
 extern "C" long getpalookup(long davis, long dashade)
 {
     return min(max(dashade + (davis >> 8), 0L), numpalookups - 1);

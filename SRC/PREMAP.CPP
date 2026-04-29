@@ -465,7 +465,7 @@ void resetplayerstats(short snum)
     pus = 1;
     p->on_warping_sector = 0;
     p->spritebridge      = 0;
-    p->palette = (char *) &palette[0];
+    p->palette = &palette[0];
 
     if(p->steroids_amount < 400 )
     {

@@ -2996,10 +2996,14 @@ void menus(void)
     }
 }
 
+
+
 void palto(char r, char g, char b, long e)
 {
     int i;
-    char temparray[768];
+     char temparray[768];
+
+    e = 0;
 
     for (i = 0; i < 768; i += 3)
     {
@@ -3018,7 +3022,7 @@ void palto(char r, char g, char b, long e)
         if ((ScreenMode != 1) || (vgacompatible == 1)) limitrate();
     // CTW END - MODIFICATION
 
-    setbrightness(ud.brightness >> 2, temparray);
+    setbrightness(ud.brightness >> 2, ps[myconnectindex].palette);
 }
 
 
@@ -3457,8 +3461,6 @@ void playanm(char* fn, char t)
     long i, j, k, length = 0, numframes = 0;
     int32 handle = -1;
 
-        return;
-#if 0 // jmarshall
     if (t != 7 && t != 9 && t != 10 && t != 11)
         KB_FlushKeyboardQueue();
 
@@ -3541,6 +3543,5 @@ ENDOFANIMLOOP:
 
     ANIM_FreeAnim();
     walock[MAXTILES - 3 - t] = 1;
-#endif
 }
 
