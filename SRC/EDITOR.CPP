@@ -19,11 +19,14 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 */
 
 #define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
 #include <windows.h>
 #include <windowsx.h>
 #include <commctrl.h>
 #include <commdlg.h>
 #include <shellapi.h>
+#include <objidl.h>
+#include <gdiplus.h>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -35,12 +38,16 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 #include <string>
 #include <vector>
 #include <unordered_map>
+#include <set>
+#include <utility>
+#include <cwchar>
 
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "gdi32.lib")
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "comdlg32.lib")
 #pragma comment(lib, "shell32.lib")
+#pragma comment(lib, "gdiplus.lib")
 
 #include "BUILD.H"
 
@@ -63,8 +70,10 @@ namespace ids
         ID_TAB = 100,
         ID_VIEW2D = 101,
         ID_HOST3D = 102,
-        ID_TEXTUREBAR = 103,
-        ID_INSPECTOR = 104,
+        ID_TILEART = 103,
+        ID_GRPEDIT = 104,
+        ID_TEXTUREBAR = 105,
+        ID_INSPECTOR = 106,
 
         ID_INSP_TILE_EDIT = 1100,
         ID_INSP_SHADE_EDIT,
@@ -72,19 +81,45 @@ namespace ids
         ID_INSP_VIS_EDIT,
         ID_INSP_LOTAG_EDIT,
         ID_INSP_HITAG_EDIT,
+        ID_INSP_X_EDIT,
+        ID_INSP_Y_EDIT,
+        ID_INSP_Z_EDIT,
         ID_INSP_USE_TILE,
         ID_INSP_APPLY,
         ID_INSP_REFRESH,
+
+        ID_ART_TILE_EDIT = 1300,
+        ID_ART_USE_SELECTED,
+        ID_ART_IMPORT_PNG,
+        ID_ART_EXPORT_PNG,
+        ID_ART_SAVE_ART,
+        ID_ART_RELOAD_GRP_PALETTE,
+
+        ID_GRP_LIST = 1400,
+        ID_GRP_SELECT_GRP,
+        ID_GRP_EXPORT_PATH_EDIT,
+        ID_GRP_CHANGE_EXPORT_PATH,
+        ID_GRP_EXTRACT_SELECTED,
+        ID_GRP_EXTRACT_ALL,
+        ID_GRP_IMPORT_FILES,
+        ID_GRP_REFRESH,
+
+        ID_CTX_MOVE_CAMERA_HERE = 1500,
+        ID_CTX_PLACE_START_HERE,
+        ID_CTX_ADD_POINT_HERE,
 
         M_FILE_NEW = 40001,
         M_FILE_OPEN,
         M_FILE_OPEN_GRP,
         M_FILE_SAVE,
         M_FILE_SAVE_AS,
+        M_FILE_RUN_MAP,
         M_FILE_EXIT,
 
         M_VIEW_2D,
         M_VIEW_3D,
+        M_VIEW_TILE_ART,
+        M_VIEW_GRPEDIT,
         M_VIEW_ZOOM_IN,
         M_VIEW_ZOOM_OUT,
         M_VIEW_GRID,
@@ -114,11 +149,15 @@ namespace ids
         M_TOOLS_Z_UP,
         M_TOOLS_Z_DOWN,
         M_TEXTURE_GOTO,
+        M_TEXTURE_TOGGLE_SIZE,
         M_HELP_KEYS,
     };
 }
 
-static constexpr int TEXTURE_BAR_HEIGHT = 138;
+static constexpr int TEXTURE_BAR_DEFAULT_HEIGHT = 138;
+static constexpr int TEXTURE_BAR_EXPANDED_HEIGHT = 312;
+static constexpr int TEXTURE_BAR_MIN_HEIGHT = 48;
+static constexpr int TEXTURE_BAR_HEIGHT = TEXTURE_BAR_DEFAULT_HEIGHT; // Kept for default creation size.
 static constexpr int TAB_MARGIN = 4;
 static constexpr int TILE_CELL = 72;
 static constexpr int TILE_PREVIEW = 56;
@@ -168,6 +207,15 @@ struct CameraState
     short sect = -1;
 };
 
+struct TileOverride
+{
+    std::vector<unsigned char> pixels; // BUILD/ART column-major 8-bit palette indexes.
+    short w = 0;
+    short h = 0;
+    long picanmValue = 0;
+    bool dirty = false;
+};
+
 struct AppState
 {
     HINSTANCE inst = nullptr;
@@ -175,13 +223,22 @@ struct AppState
     HWND tab = nullptr;
     HWND view2d = nullptr;
     HWND host3d = nullptr;
+    HWND tileArt = nullptr;
+    HWND grpEdit = nullptr;
     HWND textureBar = nullptr;
     HWND inspector = nullptr;
+    HWND inspSelectionGroup = nullptr;
+    HWND inspSurfaceGroup = nullptr;
+    HWND inspPositionGroup = nullptr;
+    HWND inspSectorGroup = nullptr;
     HWND inspTitle = nullptr;
     HWND inspSurfaceTitle = nullptr;
     HWND inspTileEdit = nullptr;
     HWND inspShadeEdit = nullptr;
     HWND inspPalEdit = nullptr;
+    HWND inspXEdit = nullptr;
+    HWND inspYEdit = nullptr;
+    HWND inspZEdit = nullptr;
     HWND inspSectorTitle = nullptr;
     HWND inspVisEdit = nullptr;
     HWND inspLotagEdit = nullptr;
@@ -189,18 +246,41 @@ struct AppState
     HWND inspUseTileButton = nullptr;
     HWND inspApplyButton = nullptr;
     HWND inspRefreshButton = nullptr;
+    HWND artTileEdit = nullptr;
+    HWND artUseSelectedButton = nullptr;
+    HWND artImportButton = nullptr;
+    HWND artExportButton = nullptr;
+    HWND artSaveButton = nullptr;
+    HWND artPaletteButton = nullptr;
+    HWND artStatusLabel = nullptr;
+    HWND grpPathLabel = nullptr;
+    HWND grpList = nullptr;
+    HWND grpSelectButton = nullptr;
+    HWND grpExportPathEdit = nullptr;
+    HWND grpChangeExportPathButton = nullptr;
+    HWND grpExtractButton = nullptr;
+    HWND grpExtractAllButton = nullptr;
+    HWND grpImportButton = nullptr;
+    HWND grpRefreshButton = nullptr;
+    HFONT inspFont = nullptr;
+    HFONT inspBoldFont = nullptr;
     HWND engine = nullptr;
     WNDPROC oldEngineProc = nullptr;
+    WNDPROC oldTabProc = nullptr;
 
     bool engineCreated = false;
     bool running = true;
     bool dirty = false;
+    bool artDirty = false;
     bool showTags = true;
     bool gridLock = true;
     int grid = 3;
-    int activeTab = 0; // 0 = 2D, 1 = 3D.
+    int activeTab = 0; // 0 = 2D, 1 = 3D, 2 = tile art, 3 = GRP edit.
 
     std::string boardPath = "newboard.map";
+    std::string dukeGrpPath;
+    std::string grpEditPath;
+    std::string grpExportPath;
     bool boardFromGrp = false;
     std::string boardGrpPath;
     std::string boardGrpEntry;
@@ -220,9 +300,12 @@ struct AppState
     short selectedTile = 0;
     int tileScroll = 0;
     std::vector<short> tileList;
+    std::unordered_map<int, TileOverride> tileOverrides;
+    bool textureBarExpanded = false;
 
     bool keys[256] = {};
     bool panning2D = false;
+    bool panning2DMoved = false;
     bool draggingPoint = false;
     bool draggingSprite = false;
     bool orbit3D = false;
@@ -233,6 +316,8 @@ struct AppState
     bool inspectorUpdating = false;
     DWORD last2DInvalidateTick = 0;
     POINT lastMouse = {};
+    POINT rightClickStart = {};
+    POINT rightClickMap = {};
     short dragPointWall = -1;
     short dragSprite = -1;
     long dragOldX = 0, dragOldY = 0;
@@ -243,9 +328,421 @@ struct AppState
 
     LARGE_INTEGER freq = {};
     LARGE_INTEGER lastTick = {};
+    ULONG_PTR gdiplusToken = 0;
 };
 
 static AppState g;
+
+// -----------------------------------------------------------------------------
+// Dark theme helpers.
+// -----------------------------------------------------------------------------
+namespace theme
+{
+    static const COLORREF WindowBg = RGB(18, 18, 22);
+    static const COLORREF PanelBg = RGB(28, 29, 34);
+    static const COLORREF CardBg = RGB(34, 36, 42);
+    static const COLORREF HeaderBg = RGB(45, 49, 58);
+    static const COLORREF EditBg = RGB(22, 23, 27);
+    static const COLORREF ButtonBg = RGB(48, 51, 60);
+    static const COLORREF ButtonHotBg = RGB(58, 62, 72);
+    static const COLORREF Border = RGB(74, 78, 88);
+    static const COLORREF Text = RGB(235, 237, 242);
+    static const COLORREF MutedText = RGB(168, 174, 184);
+    static const COLORREF Accent = RGB(255, 210, 96);
+}
+
+static HBRUSH gThemeWindowBrush = nullptr;
+static HBRUSH gThemePanelBrush = nullptr;
+static HBRUSH gThemeCardBrush = nullptr;
+static HBRUSH gThemeHeaderBrush = nullptr;
+static HBRUSH gThemeEditBrush = nullptr;
+static HBRUSH gThemeButtonBrush = nullptr;
+
+static HBRUSH themeWindowBrush() { if (!gThemeWindowBrush) gThemeWindowBrush = CreateSolidBrush(theme::WindowBg); return gThemeWindowBrush; }
+static HBRUSH themePanelBrush() { if (!gThemePanelBrush) gThemePanelBrush = CreateSolidBrush(theme::PanelBg); return gThemePanelBrush; }
+static HBRUSH themeCardBrush() { if (!gThemeCardBrush) gThemeCardBrush = CreateSolidBrush(theme::CardBg); return gThemeCardBrush; }
+static HBRUSH themeHeaderBrush() { if (!gThemeHeaderBrush) gThemeHeaderBrush = CreateSolidBrush(theme::HeaderBg); return gThemeHeaderBrush; }
+static HBRUSH themeEditBrush() { if (!gThemeEditBrush) gThemeEditBrush = CreateSolidBrush(theme::EditBg); return gThemeEditBrush; }
+static HBRUSH themeButtonBrush() { if (!gThemeButtonBrush) gThemeButtonBrush = CreateSolidBrush(theme::ButtonBg); return gThemeButtonBrush; }
+
+static void releaseThemeBrushes()
+{
+    if (gThemeWindowBrush) { DeleteObject(gThemeWindowBrush); gThemeWindowBrush = nullptr; }
+    if (gThemePanelBrush) { DeleteObject(gThemePanelBrush); gThemePanelBrush = nullptr; }
+    if (gThemeCardBrush) { DeleteObject(gThemeCardBrush); gThemeCardBrush = nullptr; }
+    if (gThemeHeaderBrush) { DeleteObject(gThemeHeaderBrush); gThemeHeaderBrush = nullptr; }
+    if (gThemeEditBrush) { DeleteObject(gThemeEditBrush); gThemeEditBrush = nullptr; }
+    if (gThemeButtonBrush) { DeleteObject(gThemeButtonBrush); gThemeButtonBrush = nullptr; }
+}
+
+static void fillRectColor(HDC hdc, const RECT& rc, COLORREF color)
+{
+    HBRUSH b = CreateSolidBrush(color);
+    FillRect(hdc, &rc, b);
+    DeleteObject(b);
+}
+
+static void drawRectFrame(HDC hdc, const RECT& rc, COLORREF color)
+{
+    HPEN pen = CreatePen(PS_SOLID, 1, color);
+    HPEN oldPen = reinterpret_cast<HPEN>(SelectObject(hdc, pen));
+    HBRUSH oldBrush = reinterpret_cast<HBRUSH>(SelectObject(hdc, GetStockObject(NULL_BRUSH)));
+    Rectangle(hdc, rc.left, rc.top, rc.right, rc.bottom);
+    SelectObject(hdc, oldBrush);
+    SelectObject(hdc, oldPen);
+    DeleteObject(pen);
+}
+
+static LRESULT darkCtlColor(UINT msg, WPARAM wp)
+{
+    HDC hdc = reinterpret_cast<HDC>(wp);
+    switch (msg)
+    {
+    case WM_CTLCOLOREDIT:
+    case WM_CTLCOLORLISTBOX:
+        SetTextColor(hdc, theme::Text);
+        SetBkColor(hdc, theme::EditBg);
+        return reinterpret_cast<LRESULT>(themeEditBrush());
+    case WM_CTLCOLORBTN:
+        SetTextColor(hdc, theme::Text);
+        SetBkColor(hdc, theme::ButtonBg);
+        return reinterpret_cast<LRESULT>(themeButtonBrush());
+    case WM_CTLCOLORSTATIC:
+        SetTextColor(hdc, theme::MutedText);
+        SetBkMode(hdc, TRANSPARENT);
+        return reinterpret_cast<LRESULT>(themePanelBrush());
+    default:
+        return reinterpret_cast<LRESULT>(themePanelBrush());
+    }
+}
+
+static void drawDarkButton(const DRAWITEMSTRUCT* dis)
+{
+    if (!dis || !dis->hwndItem) return;
+
+    RECT r = dis->rcItem;
+    const bool pressed = (dis->itemState & ODS_SELECTED) != 0;
+    const bool focus = (dis->itemState & ODS_FOCUS) != 0;
+    const bool disabled = (dis->itemState & ODS_DISABLED) != 0;
+
+    fillRectColor(dis->hDC, r, pressed ? theme::HeaderBg : theme::ButtonBg);
+    drawRectFrame(dis->hDC, r, focus ? theme::Accent : theme::Border);
+
+    char text[256] = {};
+    GetWindowTextA(dis->hwndItem, text, sizeof(text));
+    SetBkMode(dis->hDC, TRANSPARENT);
+    SetTextColor(dis->hDC, disabled ? RGB(96, 101, 110) : theme::Text);
+    if (pressed) OffsetRect(&r, 1, 1);
+    DrawTextA(dis->hDC, text, -1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+}
+
+static void enableProcessDarkMode()
+{
+    // Windows only exposes process-wide dark-menu/common-control opt-in through
+    // newer uxtheme exports. Load them dynamically so the editor still runs on
+    // older Windows versions.
+    HMODULE uxtheme = LoadLibraryA("uxtheme.dll");
+    if (!uxtheme) return;
+
+    typedef int(WINAPI* SetPreferredAppModeFn)(int);
+    typedef void(WINAPI* FlushMenuThemesFn)();
+
+    SetPreferredAppModeFn setPreferredAppMode = reinterpret_cast<SetPreferredAppModeFn>(GetProcAddress(uxtheme, MAKEINTRESOURCEA(135)));
+    FlushMenuThemesFn flushMenuThemes = reinterpret_cast<FlushMenuThemesFn>(GetProcAddress(uxtheme, MAKEINTRESOURCEA(136)));
+
+    if (setPreferredAppMode)
+        setPreferredAppMode(1); // AllowDark.
+    if (flushMenuThemes)
+        flushMenuThemes();
+
+    FreeLibrary(uxtheme);
+}
+
+static void enableDarkTitleBar(HWND hwnd)
+{
+    if (!hwnd) return;
+
+    // Let Explorer-themed child controls and menus know this HWND prefers dark
+    // mode when the OS supports it.
+    HMODULE uxtheme = LoadLibraryA("uxtheme.dll");
+    if (uxtheme)
+    {
+        typedef BOOL(WINAPI* AllowDarkModeForWindowFn)(HWND, BOOL);
+        AllowDarkModeForWindowFn allowDarkModeForWindow = reinterpret_cast<AllowDarkModeForWindowFn>(GetProcAddress(uxtheme, MAKEINTRESOURCEA(133)));
+        if (allowDarkModeForWindow)
+            allowDarkModeForWindow(hwnd, TRUE);
+        FreeLibrary(uxtheme);
+    }
+
+    HMODULE dwm = LoadLibraryA("dwmapi.dll");
+    if (!dwm) return;
+
+    typedef HRESULT(WINAPI* DwmSetWindowAttributeFn)(HWND, DWORD, LPCVOID, DWORD);
+    DwmSetWindowAttributeFn setAttribute = reinterpret_cast<DwmSetWindowAttributeFn>(GetProcAddress(dwm, "DwmSetWindowAttribute"));
+    if (setAttribute)
+    {
+        BOOL enabled = TRUE;
+        setAttribute(hwnd, 20, &enabled, sizeof(enabled)); // DWMWA_USE_IMMERSIVE_DARK_MODE on modern Windows 10/11.
+        setAttribute(hwnd, 19, &enabled, sizeof(enabled)); // Older Windows 10 builds used 19.
+
+        // Windows 11+ honors these explicit non-client colors. Older versions
+        // safely ignore the attributes, and the manual border repaint below is
+        // used as a fallback for the visible frame line.
+        COLORREF captionColor = theme::WindowBg; // DWMWA_CAPTION_COLOR = 35.
+        COLORREF borderColor = theme::Border;    // DWMWA_BORDER_COLOR = 34.
+        COLORREF textColor = theme::Text;        // DWMWA_TEXT_COLOR = 36.
+        setAttribute(hwnd, 34, &borderColor, sizeof(borderColor));
+        setAttribute(hwnd, 35, &captionColor, sizeof(captionColor));
+        setAttribute(hwnd, 36, &textColor, sizeof(textColor));
+    }
+
+    FreeLibrary(dwm);
+
+    SetWindowPos(hwnd, nullptr, 0, 0, 0, 0,
+        SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+}
+
+static void paintDarkWindowBorder(HWND hwnd)
+{
+    if (!hwnd || IsIconic(hwnd)) return;
+
+    HDC hdc = GetWindowDC(hwnd);
+    if (!hdc) return;
+
+    RECT wr{};
+    GetWindowRect(hwnd, &wr);
+    RECT r{ 0, 0, max(1, wr.right - wr.left), max(1, wr.bottom - wr.top) };
+
+    // This paints the visible frame line even on systems that do not support
+    // DWMWA_BORDER_COLOR. DWM will still own the caption buttons/title text.
+    HBRUSH borderBrush = CreateSolidBrush(theme::Border);
+    HBRUSH darkBrush = CreateSolidBrush(theme::WindowBg);
+    FrameRect(hdc, &r, borderBrush);
+    InflateRect(&r, -1, -1);
+    FrameRect(hdc, &r, darkBrush);
+    DeleteObject(darkBrush);
+    DeleteObject(borderBrush);
+
+    ReleaseDC(hwnd, hdc);
+}
+
+struct MenuDrawData
+{
+    std::string text;
+    bool topLevel = false;
+    bool separator = false;
+};
+
+static std::vector<MenuDrawData*> gDarkMenuData;
+
+static MenuDrawData* makeMenuDrawData(const char* text, bool topLevel, bool separator = false)
+{
+    MenuDrawData* data = new MenuDrawData();
+    data->text = text ? text : "";
+    data->topLevel = topLevel;
+    data->separator = separator;
+    gDarkMenuData.push_back(data);
+    return data;
+}
+
+static void releaseDarkMenuData()
+{
+    for (size_t i = 0; i < gDarkMenuData.size(); ++i)
+        delete gDarkMenuData[i];
+    gDarkMenuData.clear();
+}
+
+static std::string menuTextWithoutAmpersands(const std::string& in)
+{
+    std::string out;
+    out.reserve(in.size());
+    for (size_t i = 0; i < in.size(); ++i)
+    {
+        if (in[i] == '&')
+        {
+            if (i + 1 < in.size() && in[i + 1] == '&')
+            {
+                out.push_back('&');
+                ++i;
+            }
+            continue;
+        }
+        out.push_back(in[i]);
+    }
+    return out;
+}
+
+static void splitMenuText(const std::string& raw, std::string& left, std::string& right)
+{
+    const std::string clean = menuTextWithoutAmpersands(raw);
+    const size_t tab = clean.find('\t');
+    if (tab == std::string::npos)
+    {
+        left = clean;
+        right.clear();
+    }
+    else
+    {
+        left = clean.substr(0, tab);
+        right = clean.substr(tab + 1);
+    }
+}
+
+static void applyDarkMenuInfo(HMENU menu, bool topLevel)
+{
+    if (!menu) return;
+    MENUINFO mi{};
+    mi.cbSize = sizeof(mi);
+    mi.fMask = MIM_BACKGROUND | MIM_STYLE;
+    mi.hbrBack = topLevel ? themeWindowBrush() : themePanelBrush();
+    mi.dwStyle = MNS_CHECKORBMP;
+    SetMenuInfo(menu, &mi);
+}
+
+static void appendDarkMenuItem(HMENU menu, UINT_PTR id, const char* text)
+{
+    AppendMenuA(menu, MF_OWNERDRAW, id, reinterpret_cast<LPCSTR>(makeMenuDrawData(text, false)));
+}
+
+static void appendDarkPopupMenu(HMENU menu, HMENU popup, const char* text)
+{
+    AppendMenuA(menu, MF_POPUP | MF_OWNERDRAW, reinterpret_cast<UINT_PTR>(popup), reinterpret_cast<LPCSTR>(makeMenuDrawData(text, true)));
+}
+
+static void appendDarkSeparator(HMENU menu)
+{
+    AppendMenuA(menu, MF_OWNERDRAW | MF_GRAYED, 0, reinterpret_cast<LPCSTR>(makeMenuDrawData("", false, true)));
+}
+
+static SIZE menuTextExtent(HDC hdc, const std::string& text)
+{
+    SIZE size{ 0, 0 };
+    if (!text.empty())
+        GetTextExtentPoint32A(hdc, text.c_str(), static_cast<int>(text.size()), &size);
+    return size;
+}
+
+static void measureDarkMenuItem(MEASUREITEMSTRUCT* mis)
+{
+    if (!mis || mis->CtlType != ODT_MENU) return;
+    MenuDrawData* data = reinterpret_cast<MenuDrawData*>(mis->itemData);
+    if (!data)
+    {
+        mis->itemWidth = 80;
+        mis->itemHeight = 24;
+        return;
+    }
+    if (data->separator)
+    {
+        mis->itemWidth = 220;
+        mis->itemHeight = 9;
+        return;
+    }
+
+    HDC hdc = GetDC(g.main ? g.main : nullptr);
+    HFONT oldFont = hdc ? reinterpret_cast<HFONT>(SelectObject(hdc, GetStockObject(DEFAULT_GUI_FONT))) : nullptr;
+    std::string left, right;
+    splitMenuText(data->text, left, right);
+    SIZE leftSize = hdc ? menuTextExtent(hdc, left) : SIZE{ static_cast<LONG>(left.size() * 7), 16 };
+    SIZE rightSize = hdc ? menuTextExtent(hdc, right) : SIZE{ static_cast<LONG>(right.size() * 7), 16 };
+    if (hdc && oldFont) SelectObject(hdc, oldFont);
+    if (hdc) ReleaseDC(g.main ? g.main : nullptr, hdc);
+
+    if (data->topLevel)
+    {
+        mis->itemWidth = static_cast<UINT>(max(42L, leftSize.cx + 22L));
+        mis->itemHeight = static_cast<UINT>(max(24L, leftSize.cy + 10L));
+    }
+    else
+    {
+        const LONG accelSpace = right.empty() ? 0 : (rightSize.cx + 30L);
+        mis->itemWidth = static_cast<UINT>(max(190L, leftSize.cx + accelSpace + 52L));
+        mis->itemHeight = static_cast<UINT>(max(24L, leftSize.cy + 10L));
+    }
+}
+
+static void drawMenuCheckmark(HDC hdc, const RECT& r, COLORREF color)
+{
+    HPEN pen = CreatePen(PS_SOLID, 2, color);
+    HPEN oldPen = reinterpret_cast<HPEN>(SelectObject(hdc, pen));
+    const int cx = r.left + 13;
+    const int cy = r.top + ((r.bottom - r.top) / 2);
+    MoveToEx(hdc, cx - 4, cy, nullptr);
+    LineTo(hdc, cx - 1, cy + 4);
+    LineTo(hdc, cx + 7, cy - 5);
+    SelectObject(hdc, oldPen);
+    DeleteObject(pen);
+}
+
+static void drawDarkMenuItem(const DRAWITEMSTRUCT* dis)
+{
+    if (!dis || dis->CtlType != ODT_MENU) return;
+    MenuDrawData* data = reinterpret_cast<MenuDrawData*>(dis->itemData);
+    if (!data) return;
+
+    RECT r = dis->rcItem;
+    const bool selected = (dis->itemState & ODS_SELECTED) != 0;
+    const bool disabled = (dis->itemState & (ODS_DISABLED | ODS_GRAYED)) != 0;
+    const bool checked = (dis->itemState & ODS_CHECKED) != 0;
+    const COLORREF bg = selected ? theme::HeaderBg : (data->topLevel ? theme::WindowBg : theme::PanelBg);
+    const COLORREF text = disabled ? RGB(94, 98, 108) : (selected ? RGB(255, 255, 255) : theme::Text);
+
+    fillRectColor(dis->hDC, r, bg);
+
+    if (data->separator)
+    {
+        RECT line = r;
+        line.left += 12;
+        line.right -= 12;
+        line.top += ((line.bottom - line.top) / 2);
+        line.bottom = line.top + 1;
+        fillRectColor(dis->hDC, line, theme::Border);
+        return;
+    }
+
+    if (selected)
+    {
+        RECT hi = r;
+        InflateRect(&hi, -2, -2);
+        drawRectFrame(dis->hDC, hi, theme::Border);
+    }
+
+    std::string left, right;
+    splitMenuText(data->text, left, right);
+
+    SetBkMode(dis->hDC, TRANSPARENT);
+    SetTextColor(dis->hDC, text);
+    HFONT oldFont = reinterpret_cast<HFONT>(SelectObject(dis->hDC, GetStockObject(DEFAULT_GUI_FONT)));
+
+    if (data->topLevel)
+    {
+        RECT textRc = r;
+        InflateRect(&textRc, -10, 0);
+        DrawTextA(dis->hDC, left.c_str(), -1, &textRc, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+    }
+    else
+    {
+        RECT checkRc = r;
+        checkRc.right = checkRc.left + 28;
+        if (checked) drawMenuCheckmark(dis->hDC, checkRc, disabled ? RGB(94, 98, 108) : theme::Accent);
+
+        RECT leftRc = r;
+        leftRc.left += 30;
+        leftRc.right -= right.empty() ? 12 : 96;
+        DrawTextA(dis->hDC, left.c_str(), -1, &leftRc, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+
+        if (!right.empty())
+        {
+            RECT rightRc = r;
+            rightRc.left = max(rightRc.left + 90, rightRc.right - 92);
+            rightRc.right -= 14;
+            SetTextColor(dis->hDC, disabled ? RGB(94, 98, 108) : theme::MutedText);
+            DrawTextA(dis->hDC, right.c_str(), -1, &rightRc, DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+        }
+    }
+
+    SelectObject(dis->hDC, oldFont);
+}
 
 // -----------------------------------------------------------------------------
 // Small math helpers.
@@ -365,6 +862,14 @@ static long screenPixelsToMap(HWND hwnd, int pixels)
 static void updateInspector();
 static void applyInspectorEdits(bool useCurrentTile);
 static void syncEngineSearchGlobals(const Selection& s);
+static void updateTileArtPanel();
+static void updateGrpEditPanel();
+static void runCurrentMap();
+static bool importSelectedTileFromPng();
+static bool exportSelectedTileToPng();
+static bool saveModifiedArtFiles();
+static std::string moduleDirectory();
+static void moveCtl(HWND h, int x, int y, int w, int ht);
 
 // -----------------------------------------------------------------------------
 // UI utilities.
@@ -378,19 +883,26 @@ static void setStatus(const char* fmt, ...)
     va_end(va);
     g.status = buf;
     if (g.textureBar) InvalidateRect(g.textureBar, nullptr, FALSE);
+    if (g.tileArt) updateTileArtPanel();
 }
 
 static void updateTitle()
 {
     std::string title = "BuildX - ";
     title += g.boardPath.empty() ? "newboard.map" : g.boardPath;
-    if (g.dirty) title += " *";
+    if (g.dirty || g.artDirty) title += " *";
     if (g.main) SetWindowTextA(g.main, title.c_str());
 }
 
 static void setDirty(bool dirty = true)
 {
     g.dirty = dirty;
+    updateTitle();
+}
+
+static void setArtDirty(bool dirty = true)
+{
+    g.artDirty = dirty;
     updateTitle();
 }
 
@@ -429,16 +941,16 @@ static void request2DRefresh(HWND hwnd, bool immediate = false)
 
 static bool confirmDiscardChanges()
 {
-    if (!g.dirty) return true;
+    if (!g.dirty && !g.artDirty) return true;
 
-    const int r = MessageBoxA(g.main, "Save changes to the current map?", "Unsaved map", MB_ICONQUESTION | MB_YESNOCANCEL);
+    const int r = MessageBoxA(g.main, "Save changes to the current map or tile art?", "Unsaved changes", MB_ICONQUESTION | MB_YESNOCANCEL);
     if (r == IDCANCEL) return false;
     if (r == IDNO) return true; // Discard changes and continue with New/Open.
 
     if (r == IDYES)
     {
         SendMessage(g.main, WM_COMMAND, ids::M_FILE_SAVE, 0);
-        return !g.dirty; // Save succeeded only if the dirty flag was cleared.
+        return !g.dirty && !g.artDirty; // Save succeeded only if dirty flags were cleared.
     }
 
     return false;
@@ -447,73 +959,95 @@ static bool confirmDiscardChanges()
 static void refreshAllViews()
 {
     if (g.view2d) InvalidateRect(g.view2d, nullptr, FALSE);
+    if (g.tileArt) InvalidateRect(g.tileArt, nullptr, FALSE);
+    if (g.grpEdit) InvalidateRect(g.grpEdit, nullptr, FALSE);
     if (g.textureBar) InvalidateRect(g.textureBar, nullptr, FALSE);
     if (g.inspector) InvalidateRect(g.inspector, nullptr, FALSE);
 }
 
 static HMENU makeMainMenu()
 {
+    releaseDarkMenuData();
+
     HMENU menu = CreateMenu();
     HMENU file = CreatePopupMenu();
-    AppendMenuA(file, MF_STRING, ids::M_FILE_NEW, "&New\tCtrl+N");
-    AppendMenuA(file, MF_STRING, ids::M_FILE_OPEN, "&Open...\tCtrl+O");
-    AppendMenuA(file, MF_STRING, ids::M_FILE_OPEN_GRP, "Open From &GRP...");
-    AppendMenuA(file, MF_SEPARATOR, 0, nullptr);
-    AppendMenuA(file, MF_STRING, ids::M_FILE_SAVE, "&Save\tCtrl+S");
-    AppendMenuA(file, MF_STRING, ids::M_FILE_SAVE_AS, "Save &As...");
-    AppendMenuA(file, MF_SEPARATOR, 0, nullptr);
-    AppendMenuA(file, MF_STRING, ids::M_FILE_EXIT, "E&xit");
-    AppendMenuA(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(file), "&File");
+    appendDarkMenuItem(file, ids::M_FILE_NEW, "&New\tCtrl+N");
+    appendDarkMenuItem(file, ids::M_FILE_OPEN, "&Open...\tCtrl+O");
+    appendDarkMenuItem(file, ids::M_FILE_OPEN_GRP, "Open From &GRP...");
+    appendDarkSeparator(file);
+    appendDarkMenuItem(file, ids::M_FILE_SAVE, "&Save\tCtrl+S");
+    appendDarkMenuItem(file, ids::M_FILE_SAVE_AS, "Save &As...");
+    appendDarkSeparator(file);
+    appendDarkMenuItem(file, ids::M_FILE_RUN_MAP, "&Run Map\tF5");
+    appendDarkSeparator(file);
+    appendDarkMenuItem(file, ids::M_FILE_EXIT, "E&xit");
+    applyDarkMenuInfo(file, false);
+    appendDarkPopupMenu(menu, file, "&File");
+
+    HMENU run = CreatePopupMenu();
+    appendDarkMenuItem(run, ids::M_FILE_RUN_MAP, "&Run Current Map\tF5");
+    applyDarkMenuInfo(run, false);
+    appendDarkPopupMenu(menu, run, "&Run");
 
     HMENU view = CreatePopupMenu();
-    AppendMenuA(view, MF_STRING, ids::M_VIEW_2D, "Show &2D Editor\tF2");
-    AppendMenuA(view, MF_STRING, ids::M_VIEW_3D, "Show &3D Editor\tF3");
-    AppendMenuA(view, MF_SEPARATOR, 0, nullptr);
-    AppendMenuA(view, MF_STRING, ids::M_VIEW_ZOOM_IN, "Zoom &In");
-    AppendMenuA(view, MF_STRING, ids::M_VIEW_ZOOM_OUT, "Zoom &Out");
-    AppendMenuA(view, MF_STRING, ids::M_VIEW_GRID, "Cycle &Grid\tG");
-    AppendMenuA(view, MF_STRING, ids::M_VIEW_GRID_LOCK, "&Grid Lock\tL");
-    AppendMenuA(view, MF_STRING, ids::M_VIEW_SHOW_TAGS, "Show &Tags\tCtrl+T");
-    AppendMenuA(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(view), "&View");
+    appendDarkMenuItem(view, ids::M_VIEW_2D, "Show &2D Editor\tF2");
+    appendDarkMenuItem(view, ids::M_VIEW_3D, "Show &3D Editor\tF3");
+    appendDarkMenuItem(view, ids::M_VIEW_TILE_ART, "Show &Tile Art\tF4");
+    appendDarkMenuItem(view, ids::M_VIEW_GRPEDIT, "Show &GRP Edit\tF6");
+    appendDarkSeparator(view);
+    appendDarkMenuItem(view, ids::M_VIEW_ZOOM_IN, "Zoom &In");
+    appendDarkMenuItem(view, ids::M_VIEW_ZOOM_OUT, "Zoom &Out");
+    appendDarkMenuItem(view, ids::M_VIEW_GRID, "Cycle &Grid\tG");
+    appendDarkMenuItem(view, ids::M_VIEW_GRID_LOCK, "&Grid Lock\tL");
+    appendDarkMenuItem(view, ids::M_VIEW_SHOW_TAGS, "Show &Tags\tCtrl+T");
+    applyDarkMenuInfo(view, false);
+    appendDarkPopupMenu(menu, view, "&View");
 
     HMENU edit = CreatePopupMenu();
-    AppendMenuA(edit, MF_STRING, ids::M_EDIT_BEGIN_DRAW, "Begin/Add Sector Point\tSpace");
-    AppendMenuA(edit, MF_STRING, ids::M_EDIT_CLOSE_DRAW, "Close Drawn Sector\tEnter");
-    AppendMenuA(edit, MF_STRING, ids::M_EDIT_CANCEL_DRAW, "Cancel Sector Drawing\tEsc");
-    AppendMenuA(edit, MF_SEPARATOR, 0, nullptr);
-    AppendMenuA(edit, MF_STRING, ids::M_EDIT_INSERT_POINT, "Insert Point\tIns");
-    AppendMenuA(edit, MF_STRING, ids::M_EDIT_INSERT_SPRITE, "Insert Sprite\tS");
-    AppendMenuA(edit, MF_STRING, ids::M_EDIT_DELETE, "Delete Selection\tDel");
-    AppendMenuA(edit, MF_SEPARATOR, 0, nullptr);
-    AppendMenuA(edit, MF_STRING, ids::M_EDIT_COPY_PROPS, "Copy Properties\tTab");
-    AppendMenuA(edit, MF_STRING, ids::M_EDIT_PASTE_PROPS, "Paste Properties\tEnter");
-    AppendMenuA(edit, MF_STRING, ids::M_EDIT_APPLY_TEXTURE, "Apply Selected Texture\tV");
-    AppendMenuA(edit, MF_STRING, ids::M_EDIT_PROPERTIES, "Properties...\tAlt+Enter");
-    AppendMenuA(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(edit), "&Edit");
+    appendDarkMenuItem(edit, ids::M_EDIT_BEGIN_DRAW, "Begin/Add Sector Point\tSpace");
+    appendDarkMenuItem(edit, ids::M_EDIT_CLOSE_DRAW, "Close Drawn Sector\tEnter");
+    appendDarkMenuItem(edit, ids::M_EDIT_CANCEL_DRAW, "Cancel Sector Drawing\tEsc");
+    appendDarkSeparator(edit);
+    appendDarkMenuItem(edit, ids::M_EDIT_INSERT_POINT, "Insert Point\tIns");
+    appendDarkMenuItem(edit, ids::M_EDIT_INSERT_SPRITE, "Insert Sprite\tS");
+    appendDarkMenuItem(edit, ids::M_EDIT_DELETE, "Delete Selection\tDel");
+    appendDarkSeparator(edit);
+    appendDarkMenuItem(edit, ids::M_EDIT_COPY_PROPS, "Copy Properties\tTab");
+    appendDarkMenuItem(edit, ids::M_EDIT_PASTE_PROPS, "Paste Properties\tEnter");
+    appendDarkMenuItem(edit, ids::M_EDIT_APPLY_TEXTURE, "Apply Selected Texture\tV");
+    appendDarkMenuItem(edit, ids::M_EDIT_PROPERTIES, "Properties...\tAlt+Enter");
+    applyDarkMenuInfo(edit, false);
+    appendDarkPopupMenu(menu, edit, "&Edit");
 
     HMENU tools = CreatePopupMenu();
-    AppendMenuA(tools, MF_STRING, ids::M_TOOLS_RELINK, "Repair Red-Wall Links");
-    AppendMenuA(tools, MF_STRING, ids::M_TOOLS_SET_START, "Set Player Start Here\tScroll Lock");
-    AppendMenuA(tools, MF_SEPARATOR, 0, nullptr);
-    AppendMenuA(tools, MF_STRING, ids::M_TOOLS_TOGGLE_BLOCKING, "Toggle Blocking\tB");
-    AppendMenuA(tools, MF_STRING, ids::M_TOOLS_TOGGLE_ONEWAY, "Toggle One-Way\t1");
-    AppendMenuA(tools, MF_STRING, ids::M_TOOLS_TOGGLE_MASKED, "Toggle Masked Wall\tM");
-    AppendMenuA(tools, MF_STRING, ids::M_TOOLS_TOGGLE_TRANSLUCENT, "Toggle Translucency\tT");
-    AppendMenuA(tools, MF_STRING, ids::M_TOOLS_TOGGLE_PARALLAX, "Toggle Parallax\tP");
-    AppendMenuA(tools, MF_SEPARATOR, 0, nullptr);
-    AppendMenuA(tools, MF_STRING, ids::M_TOOLS_SHADE_UP, "Shade Darker\t-");
-    AppendMenuA(tools, MF_STRING, ids::M_TOOLS_SHADE_DOWN, "Shade Brighter\t+");
-    AppendMenuA(tools, MF_STRING, ids::M_TOOLS_Z_UP, "Raise Z\tPgUp");
-    AppendMenuA(tools, MF_STRING, ids::M_TOOLS_Z_DOWN, "Lower Z\tPgDn");
-    AppendMenuA(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(tools), "&Tools");
+    appendDarkMenuItem(tools, ids::M_TOOLS_RELINK, "Repair Red-Wall Links");
+    appendDarkMenuItem(tools, ids::M_TOOLS_SET_START, "Set Player Start Here\tScroll Lock");
+    appendDarkSeparator(tools);
+    appendDarkMenuItem(tools, ids::M_TOOLS_TOGGLE_BLOCKING, "Toggle Blocking\tB");
+    appendDarkMenuItem(tools, ids::M_TOOLS_TOGGLE_ONEWAY, "Toggle One-Way\t1");
+    appendDarkMenuItem(tools, ids::M_TOOLS_TOGGLE_MASKED, "Toggle Masked Wall\tM");
+    appendDarkMenuItem(tools, ids::M_TOOLS_TOGGLE_TRANSLUCENT, "Toggle Translucency\tT");
+    appendDarkMenuItem(tools, ids::M_TOOLS_TOGGLE_PARALLAX, "Toggle Parallax\tP");
+    appendDarkSeparator(tools);
+    appendDarkMenuItem(tools, ids::M_TOOLS_SHADE_UP, "Shade Darker\t-");
+    appendDarkMenuItem(tools, ids::M_TOOLS_SHADE_DOWN, "Shade Brighter\t+");
+    appendDarkMenuItem(tools, ids::M_TOOLS_Z_UP, "Raise Z\tPgUp");
+    appendDarkMenuItem(tools, ids::M_TOOLS_Z_DOWN, "Lower Z\tPgDn");
+    applyDarkMenuInfo(tools, false);
+    appendDarkPopupMenu(menu, tools, "&Tools");
 
     HMENU texture = CreatePopupMenu();
-    AppendMenuA(texture, MF_STRING, ids::M_TEXTURE_GOTO, "Goto Tile...");
-    AppendMenuA(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(texture), "&Texture");
+    appendDarkMenuItem(texture, ids::M_TEXTURE_GOTO, "Goto Tile...");
+    appendDarkMenuItem(texture, ids::M_TEXTURE_TOGGLE_SIZE, "Expand/Collapse Texture Browser");
+    applyDarkMenuInfo(texture, false);
+    appendDarkPopupMenu(menu, texture, "&Texture");
 
     HMENU help = CreatePopupMenu();
-    AppendMenuA(help, MF_STRING, ids::M_HELP_KEYS, "Keyboard Help");
-    AppendMenuA(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(help), "&Help");
+    appendDarkMenuItem(help, ids::M_HELP_KEYS, "Keyboard Help");
+    applyDarkMenuInfo(help, false);
+    appendDarkPopupMenu(menu, help, "&Help");
+
+    applyDarkMenuInfo(menu, true);
     return menu;
 }
 
@@ -539,15 +1073,31 @@ static LRESULT CALLBACK InputBoxProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     {
         st = reinterpret_cast<InputBoxState*>(reinterpret_cast<CREATESTRUCTA*>(lp)->lpCreateParams);
         SetWindowLongPtrA(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(st));
+        enableDarkTitleBar(hwnd);
         CreateWindowA("STATIC", st->label.c_str(), WS_CHILD | WS_VISIBLE, 12, 12, 340, 18, hwnd, nullptr, g.inst, nullptr);
         st->edit = CreateWindowExA(WS_EX_CLIENTEDGE, "EDIT", st->value.c_str(), WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
             12, 38, 340, 24, hwnd, reinterpret_cast<HMENU>(1), g.inst, nullptr);
-        CreateWindowA("BUTTON", "OK", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON, 196, 74, 72, 26, hwnd, reinterpret_cast<HMENU>(IDOK), g.inst, nullptr);
-        CreateWindowA("BUTTON", "Cancel", WS_CHILD | WS_VISIBLE, 280, 74, 72, 26, hwnd, reinterpret_cast<HMENU>(IDCANCEL), g.inst, nullptr);
+        CreateWindowA("BUTTON", "OK", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON | BS_OWNERDRAW, 196, 74, 72, 26, hwnd, reinterpret_cast<HMENU>(IDOK), g.inst, nullptr);
+        CreateWindowA("BUTTON", "Cancel", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 280, 74, 72, 26, hwnd, reinterpret_cast<HMENU>(IDCANCEL), g.inst, nullptr);
         SendMessageA(st->edit, EM_SETSEL, 0, -1);
         SetFocus(st->edit);
         return 0;
     }
+    case WM_CTLCOLORSTATIC:
+    case WM_CTLCOLOREDIT:
+    case WM_CTLCOLORBTN:
+        return darkCtlColor(msg, wp);
+    case WM_ERASEBKGND:
+    {
+        HDC hdc = reinterpret_cast<HDC>(wp);
+        RECT rc{};
+        GetClientRect(hwnd, &rc);
+        fillRectColor(hdc, rc, theme::PanelBg);
+        return 1;
+    }
+    case WM_DRAWITEM:
+        drawDarkButton(reinterpret_cast<DRAWITEMSTRUCT*>(lp));
+        return TRUE;
     case WM_COMMAND:
         if (LOWORD(wp) == IDOK)
         {
@@ -585,7 +1135,7 @@ static bool promptString(const char* title, const char* label, std::string& valu
         wc.hInstance = g.inst;
         wc.lpszClassName = "BuildEditorInputBox";
         wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
-        wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_BTNFACE + 1);
+        wc.hbrBackground = themePanelBrush();
         RegisterClassA(&wc);
         registered = true;
     }
@@ -672,6 +1222,7 @@ static LRESULT CALLBACK ChoiceBoxProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     {
         st = reinterpret_cast<ChoiceBoxState*>(reinterpret_cast<CREATESTRUCTA*>(lp)->lpCreateParams);
         SetWindowLongPtrA(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(st));
+        enableDarkTitleBar(hwnd);
         CreateWindowA("STATIC", st->label.c_str(), WS_CHILD | WS_VISIBLE, 12, 12, 396, 18, hwnd, nullptr, g.inst, nullptr);
         st->list = CreateWindowExA(WS_EX_CLIENTEDGE, "LISTBOX", "",
             WS_CHILD | WS_VISIBLE | WS_VSCROLL | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT,
@@ -679,11 +1230,27 @@ static LRESULT CALLBACK ChoiceBoxProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         for (const std::string& item : st->items)
             SendMessageA(st->list, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(item.c_str()));
         SendMessageA(st->list, LB_SETCURSEL, clamp_int(st->selected, 0, static_cast<int>(st->items.size()) - 1), 0);
-        CreateWindowA("BUTTON", "OK", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON, 252, 280, 72, 26, hwnd, reinterpret_cast<HMENU>(IDOK), g.inst, nullptr);
-        CreateWindowA("BUTTON", "Cancel", WS_CHILD | WS_VISIBLE, 336, 280, 72, 26, hwnd, reinterpret_cast<HMENU>(IDCANCEL), g.inst, nullptr);
+        CreateWindowA("BUTTON", "OK", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON | BS_OWNERDRAW, 252, 280, 72, 26, hwnd, reinterpret_cast<HMENU>(IDOK), g.inst, nullptr);
+        CreateWindowA("BUTTON", "Cancel", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 336, 280, 72, 26, hwnd, reinterpret_cast<HMENU>(IDCANCEL), g.inst, nullptr);
         SetFocus(st->list);
         return 0;
     }
+    case WM_CTLCOLORSTATIC:
+    case WM_CTLCOLOREDIT:
+    case WM_CTLCOLORLISTBOX:
+    case WM_CTLCOLORBTN:
+        return darkCtlColor(msg, wp);
+    case WM_ERASEBKGND:
+    {
+        HDC hdc = reinterpret_cast<HDC>(wp);
+        RECT rc{};
+        GetClientRect(hwnd, &rc);
+        fillRectColor(hdc, rc, theme::PanelBg);
+        return 1;
+    }
+    case WM_DRAWITEM:
+        drawDarkButton(reinterpret_cast<DRAWITEMSTRUCT*>(lp));
+        return TRUE;
     case WM_COMMAND:
         if (LOWORD(wp) == IDOK || (LOWORD(wp) == 1001 && HIWORD(wp) == LBN_DBLCLK))
         {
@@ -715,7 +1282,7 @@ static bool chooseStringIndex(const char* title, const char* label, const std::v
         wc.hInstance = g.inst;
         wc.lpszClassName = "BuildEditorChoiceBox";
         wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
-        wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_BTNFACE + 1);
+        wc.hbrBackground = themePanelBrush();
         RegisterClassA(&wc);
         registered = true;
     }
@@ -909,6 +1476,7 @@ static void centerTextureBarOnSelected()
     if (g.tileList.empty()) return;
     g.tileScroll = max(0, tileListIndex(g.selectedTile) - 2);
     if (g.textureBar) InvalidateRect(g.textureBar, nullptr, FALSE);
+    if (g.tileArt) updateTileArtPanel();
 }
 
 static void initNewMap()
@@ -1065,9 +1633,73 @@ static std::string upperAscii(std::string s)
     return s;
 }
 
-static bool readGrpMapEntries(const char* grpPath, std::vector<GrpMapEntry>& maps)
+static std::string fullPathOf(const char* path)
 {
-    maps.clear();
+    if (!path || !path[0]) return std::string();
+    char full[MAX_PATH] = {};
+    DWORD n = GetFullPathNameA(path, sizeof(full), full, nullptr);
+    if (n == 0 || n >= sizeof(full)) return path;
+    return full;
+}
+
+static bool fileExistsA(const char* path)
+{
+    if (!path || !path[0]) return false;
+    DWORD attr = GetFileAttributesA(path);
+    return attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY) == 0;
+}
+
+static std::string pathDirectory(const std::string& path)
+{
+    size_t p1 = path.find_last_of('\\');
+    size_t p2 = path.find_last_of('/');
+    size_t p = std::string::npos;
+    if (p1 != std::string::npos && p2 != std::string::npos) p = max(p1, p2);
+    else p = (p1 != std::string::npos) ? p1 : p2;
+    if (p == std::string::npos) return ".";
+    if (p == 0) return path.substr(0, 1);
+    return path.substr(0, p);
+}
+
+static std::string pathJoin(const std::string& dir, const std::string& name)
+{
+    if (dir.empty() || dir == ".") return name;
+    char last = dir[dir.size() - 1];
+    if (last == '\\' || last == '/') return dir + name;
+    return dir + "\\" + name;
+}
+
+static std::string pathBaseNameString(const std::string& path)
+{
+    size_t p1 = path.find_last_of('\\');
+    size_t p2 = path.find_last_of('/');
+    size_t p = std::string::npos;
+    if (p1 != std::string::npos && p2 != std::string::npos) p = max(p1, p2);
+    else p = (p1 != std::string::npos) ? p1 : p2;
+    return p == std::string::npos ? path : path.substr(p + 1);
+}
+
+static std::string forceMapExtension(std::string s)
+{
+    const std::string up = upperAscii(s);
+    if (up.size() < 4 || up.substr(up.size() - 4) != ".MAP") s += ".map";
+    return s;
+}
+
+static std::string sanitizeFileName(std::string s)
+{
+    if (s.empty()) s = "BuildXRun.map";
+    for (char& ch : s)
+    {
+        if (ch == '<' || ch == '>' || ch == ':' || ch == '"' || ch == '/' || ch == '\\' || ch == '|' || ch == '?' || ch == '*')
+            ch = '_';
+    }
+    return s;
+}
+
+static bool readGrpEntries(const char* grpPath, std::vector<GrpMapEntry>& entries)
+{
+    entries.clear();
     if (!grpPath || !grpPath[0]) return false;
 
     FILE* f = nullptr;
@@ -1097,21 +1729,72 @@ static bool readGrpMapEntries(const char* grpPath, std::vector<GrpMapEntry>& map
 
         size_t nameLen = 0;
         while (nameLen < sizeof(rawName) && rawName[nameLen] != 0) ++nameLen;
-        std::string name(rawName, rawName + nameLen);
         const std::uint32_t size = readLe32(sizeBytes);
 
-        if (hasMapExtension(name) && dataOffset <= 0xffffffffull)
+        if (dataOffset <= 0xffffffffull)
         {
             GrpMapEntry e;
-            e.name = name;
+            e.name.assign(rawName, rawName + nameLen);
             e.offset = static_cast<std::uint32_t>(dataOffset);
             e.size = size;
-            maps.push_back(e);
+            entries.push_back(e);
         }
         dataOffset += size;
     }
 
     std::fclose(f);
+    return true;
+}
+
+static bool findGrpEntry(const char* grpPath, const char* wantedName, GrpMapEntry& out)
+{
+    std::vector<GrpMapEntry> entries;
+    if (!readGrpEntries(grpPath, entries)) return false;
+    const std::string wanted = upperAscii(wantedName ? wantedName : "");
+    for (const GrpMapEntry& e : entries)
+    {
+        if (upperAscii(e.name) == wanted)
+        {
+            out = e;
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool readGrpEntryBytes(const char* grpPath, const GrpMapEntry& entry, std::vector<unsigned char>& data)
+{
+    data.clear();
+    FILE* f = nullptr;
+    if (fopen_s(&f, grpPath, "rb") != 0 || !f) return false;
+    if (std::fseek(f, static_cast<long>(entry.offset), SEEK_SET) != 0)
+    {
+        std::fclose(f);
+        return false;
+    }
+    data.resize(entry.size);
+    bool ok = entry.size == 0 || std::fread(data.data(), 1, entry.size, f) == entry.size;
+    std::fclose(f);
+    return ok;
+}
+
+static bool loadPaletteFromGrp(const char* grpPath)
+{
+    GrpMapEntry palEntry;
+    if (!findGrpEntry(grpPath, "PALETTE.DAT", palEntry)) return false;
+    std::vector<unsigned char> bytes;
+    if (!readGrpEntryBytes(grpPath, palEntry, bytes) || bytes.size() < 768) return false;
+    for (int i = 0; i < 768; ++i) palette[i] = static_cast<char>(bytes[static_cast<size_t>(i)]);
+    return true;
+}
+
+static bool readGrpMapEntries(const char* grpPath, std::vector<GrpMapEntry>& maps)
+{
+    maps.clear();
+    std::vector<GrpMapEntry> entries;
+    if (!readGrpEntries(grpPath, entries)) return false;
+    for (const GrpMapEntry& e : entries)
+        if (hasMapExtension(e.name)) maps.push_back(e);
     std::sort(maps.begin(), maps.end(), [](const GrpMapEntry& a, const GrpMapEntry& b)
         {
             return upperAscii(a.name) < upperAscii(b.name);
@@ -1241,6 +1924,11 @@ static bool promptOpenMapFromGrp()
 
     g.boardFromGrp = true;
     g.boardGrpPath = grpFile;
+    g.dukeGrpPath = fullPathOf(grpFile);
+    g.grpEditPath = g.dukeGrpPath;
+    if (g.grpExportPath.empty()) g.grpExportPath = pathJoin(pathDirectory(g.grpEditPath), "grp_export");
+    updateGrpEditPanel();
+    loadPaletteFromGrp(g.dukeGrpPath.c_str());
     g.boardGrpEntry = maps[choice].name;
     g.boardPath = std::string(maps[choice].name) + " (" + pathBaseName(grpFile) + ")";
     setDirty(false);
@@ -1613,13 +2301,17 @@ static short nearestPointAtScreen(HWND hwnd, int sx, int sy)
 
 static short nearestSpriteAtScreen(HWND hwnd, int sx, int sy)
 {
-    const double th2 = 10.0 * 10.0;
+    // Sprites are small crosses in the 2D view; give them a generous click
+    // target and let them win over nearby sector/wall hits. This fixes the
+    // common editor problem where clicks on sprites fall through to floors.
+    const double th2 = 22.0 * 22.0;
     double best = th2;
     short bestSprite = -1;
 
     for (short i = 0; i < MAXSPRITES; ++i)
     {
-        if (sprite[i].statnum >= MAXSTATUS || sprite[i].sectnum >= MAXSECTORS) continue;
+        if (sprite[i].statnum < 0 || sprite[i].statnum >= MAXSTATUS ||
+            sprite[i].sectnum < 0 || sprite[i].sectnum >= MAXSECTORS) continue;
 
         int vx = 0, vy = 0;
         mapToScreen(hwnd, sprite[i].x, sprite[i].y, vx, vy);
@@ -1768,10 +2460,19 @@ static bool selectedSurfaceValid()
         return selectedSectorValid();
     case SS_SPRITE:
         return g.sel.wall >= 0 && g.sel.wall < MAXSPRITES &&
-            sprite[g.sel.wall].statnum < MAXSTATUS && sprite[g.sel.wall].sectnum < MAXSECTORS;
+            sprite[g.sel.wall].statnum >= 0 && sprite[g.sel.wall].statnum < MAXSTATUS &&
+            sprite[g.sel.wall].sectnum >= 0 && sprite[g.sel.wall].sectnum < MAXSECTORS;
     default:
         return false;
     }
+}
+
+static bool selectedSpriteValid()
+{
+    return g.sel.stat == SS_SPRITE &&
+        g.sel.wall >= 0 && g.sel.wall < MAXSPRITES &&
+        sprite[g.sel.wall].statnum >= 0 && sprite[g.sel.wall].statnum < MAXSTATUS &&
+        sprite[g.sel.wall].sectnum >= 0 && sprite[g.sel.wall].sectnum < MAXSECTORS;
 }
 
 static const char* selectedSurfaceName()
@@ -2083,6 +2784,8 @@ static void zAdjustSelection(long dz)
         break;
     case SS_SPRITE:
         sprite[g.sel.wall].z += dz;
+        setsprite(g.sel.wall, sprite[g.sel.wall].x, sprite[g.sel.wall].y, sprite[g.sel.wall].z);
+        g.sel.sector = sprite[g.sel.wall].sectnum;
         break;
     case SS_WALL:
     case SS_MASKED_WALL:
@@ -2090,7 +2793,7 @@ static void zAdjustSelection(long dz)
         sector[g.sel.sector].floorz += dz;
         break;
     }
-    setDirty(); refreshAllViews();
+    setDirty(); updateInspector(); refreshAllViews();
 }
 
 static void toggleBlocking()
@@ -2302,6 +3005,152 @@ static HWND findEngineWindow()
     return data.found;
 }
 
+static long cameraForwardDepth(long wx, long wy)
+{
+    const long dx = wx - g.cam.x;
+    const long dy = wy - g.cam.y;
+    const long fx = sintable[(g.cam.ang + 512) & 2047];
+    const long fy = sintable[g.cam.ang & 2047];
+    return static_cast<long>((static_cast<std::int64_t>(dx) * fx + static_cast<std::int64_t>(dy) * fy) >> 14);
+}
+
+static bool projectWorldTo3DScreen(long wx, long wy, long wz, int viewW, int viewH, int& outX, int& outY, long& outDepth)
+{
+    const long dx = wx - g.cam.x;
+    const long dy = wy - g.cam.y;
+    const long fx = sintable[(g.cam.ang + 512) & 2047];
+    const long fy = sintable[g.cam.ang & 2047];
+    const long rx = -fy;
+    const long ry = fx;
+
+    const long forward = static_cast<long>((static_cast<std::int64_t>(dx) * fx + static_cast<std::int64_t>(dy) * fy) >> 14);
+    if (forward <= 64) return false;
+
+    const long side = static_cast<long>((static_cast<std::int64_t>(dx) * rx + static_cast<std::int64_t>(dy) * ry) >> 14);
+    const long cx = viewW >> 1;
+    outX = static_cast<int>(cx + scale_local(side, cx, forward));
+
+    // pick3D builds a ray with dz = (screenY * 200 / h - horiz) * 2000.
+    // This inverse projects a BUILD z coordinate back into that same screen space.
+    const double rayDz = (static_cast<double>(wz - g.cam.z) * 16384.0) / static_cast<double>(forward);
+    const double screenY = (static_cast<double>(g.cam.horiz) + (rayDz / 2000.0)) * static_cast<double>(viewH) / 200.0;
+    outY = static_cast<int>(std::llround(screenY));
+    outDepth = forward;
+    return true;
+}
+
+static bool activeVisibleSprite(short i)
+{
+    if (i < 0 || i >= MAXSPRITES) return false;
+    const spritetype& sp = sprite[i];
+    if (sp.statnum < 0 || sp.statnum >= MAXSTATUS || sp.sectnum < 0 || sp.sectnum >= MAXSECTORS) return false;
+    if (sp.picnum < 0 || sp.picnum >= MAXTILES) return false;
+    if (tilesizx[sp.picnum] <= 0 || tilesizy[sp.picnum] <= 0) return false;
+    if (sp.cstat & 32768) return false; // Invisible sprite flag.
+    return true;
+}
+
+static bool spriteScreenBounds(short i, int viewW, int viewH, RECT& outBox, int& outCenterX, int& outCenterY, long& outDepth)
+{
+    if (!activeVisibleSprite(i)) return false;
+
+    const spritetype& sp = sprite[i];
+    const int tileW = max(1, static_cast<int>(tilesizx[sp.picnum]));
+    const int tileH = max(1, static_cast<int>(tilesizy[sp.picnum]));
+    const int xrep = max(1, static_cast<int>(static_cast<unsigned char>(sp.xrepeat)));
+    const int yrep = max(1, static_cast<int>(static_cast<unsigned char>(sp.yrepeat)));
+
+    // BUILD face sprites usually store z at the bottom unless cstat bit 128 centers them.
+    // This only needs an editor pick rectangle, so use a deliberately forgiving box.
+    const long zHeight = static_cast<long>(tileH) * static_cast<long>(yrep) * 4L;
+    const bool centered = (sp.cstat & 128) != 0;
+    const long topZ = centered ? sp.z - (zHeight >> 1) : sp.z - zHeight;
+    const long bottomZ = centered ? sp.z + (zHeight >> 1) : sp.z;
+    const long midZ = topZ + ((bottomZ - topZ) >> 1);
+
+    if (!projectWorldTo3DScreen(sp.x, sp.y, midZ, viewW, viewH, outCenterX, outCenterY, outDepth))
+        return false;
+
+    int topX = outCenterX, topY = outCenterY;
+    int botX = outCenterX, botY = outCenterY;
+    long dummyDepth = outDepth;
+    projectWorldTo3DScreen(sp.x, sp.y, topZ, viewW, viewH, topX, topY, dummyDepth);
+    projectWorldTo3DScreen(sp.x, sp.y, bottomZ, viewW, viewH, botX, botY, dummyDepth);
+
+    int y0 = min(topY, botY);
+    int y1 = max(topY, botY);
+
+    const int scaledW = static_cast<int>((static_cast<double>(tileW) * static_cast<double>(xrep) * static_cast<double>(viewW)) /
+        (max(1.0, static_cast<double>(outDepth)) * 8.0));
+    const int fallbackH = static_cast<int>((static_cast<double>(tileH) * static_cast<double>(yrep) * static_cast<double>(viewH)) /
+        (max(1.0, static_cast<double>(outDepth)) * 8.0));
+
+    const int halfW = clamp_int(scaledW >> 1, 8, 160);
+    const int halfH = clamp_int(fallbackH >> 1, 8, 180);
+    if (std::abs(y1 - y0) < halfH * 2)
+    {
+        y0 = outCenterY - halfH;
+        y1 = outCenterY + halfH;
+    }
+
+    // Wall/floor aligned sprites can have very flat projected height from this approximation.
+    // Keep a small click target around their projected center so they remain selectable.
+    const int pad = 6;
+    outBox.left = outCenterX - halfW - pad;
+    outBox.right = outCenterX + halfW + pad;
+    outBox.top = y0 - pad;
+    outBox.bottom = y1 + pad;
+
+    const int offscreenPad = 256;
+    if (outBox.right < -offscreenPad || outBox.left > viewW + offscreenPad ||
+        outBox.bottom < -offscreenPad || outBox.top > viewH + offscreenPad)
+        return false;
+
+    return true;
+}
+
+static double distanceToRect2(int x, int y, const RECT& r)
+{
+    const int cx = clamp_int(x, r.left, r.right);
+    const int cy = clamp_int(y, r.top, r.bottom);
+    return dist2(x, y, cx, cy);
+}
+
+static short pick3DSpriteByScreen(int sx, int sy, int viewW, int viewH, long maxDepth)
+{
+    short bestSprite = -1;
+    long bestDepth = 0x7fffffffL;
+    double bestCenterDistance = 1.0e30;
+
+    for (short i = 0; i < MAXSPRITES; ++i)
+    {
+        RECT box{};
+        int cx = 0, cy = 0;
+        long depth = 0;
+        if (!spriteScreenBounds(i, viewW, viewH, box, cx, cy, depth)) continue;
+
+        // If the normal hitscan struck a wall/floor first, do not select sprites
+        // that are clearly behind that hit point. A little tolerance helps with
+        // large sprites whose visual center can be behind the click surface.
+        if (maxDepth > 0 && depth > maxDepth + 1024) continue;
+
+        const double edgeD2 = distanceToRect2(sx, sy, box);
+        const double centerD2 = dist2(sx, sy, cx, cy);
+        if (edgeD2 > 16.0 * 16.0 && centerD2 > 24.0 * 24.0) continue;
+
+        // Prefer the nearest visible sprite; for equal depths, use the one the
+        // user clicked closest to. This behaves better when sprites overlap.
+        if (depth < bestDepth || (depth == bestDepth && centerD2 < bestCenterDistance))
+        {
+            bestDepth = depth;
+            bestCenterDistance = centerD2;
+            bestSprite = i;
+        }
+    }
+
+    return bestSprite;
+}
+
 static Selection pick3D(int sx, int sy)
 {
     Selection s;
@@ -2317,7 +3166,28 @@ static Selection pick3D(int sx, int sy)
 
     short hs = -1, hw = -1, hsp = -1;
     long hx = 0, hy = 0, hz = 0;
+
+    // Most editor sprites are non-blocking, so a normal game hitscan can miss
+    // them and return the wall/floor behind them. Temporarily make every active
+    // sprite both blocking and hitscan-blocking, then restore cstat immediately.
+    std::vector<std::pair<short, short> > forcedSpriteCstats;
+    for (short i = 0; i < MAXSPRITES; ++i)
+    {
+        if (sprite[i].statnum < 0 || sprite[i].statnum >= MAXSTATUS ||
+            sprite[i].sectnum < 0 || sprite[i].sectnum >= MAXSECTORS) continue;
+        if ((sprite[i].cstat & 257) != 257)
+        {
+            forcedSpriteCstats.push_back(std::make_pair(i, sprite[i].cstat));
+            sprite[i].cstat = static_cast<short>(sprite[i].cstat | 257);
+        }
+    }
+
     hitscan(g.cam.x, g.cam.y, g.cam.z, g.cam.sect, dax, day, dz, &hs, &hw, &hsp, &hx, &hy, &hz, CLIPMASK1);
+
+    for (size_t i = 0; i < forcedSpriteCstats.size(); ++i)
+        sprite[forcedSpriteCstats[i].first].cstat = forcedSpriteCstats[i].second;
+
+    const long hitDepth = (hw >= 0 || hs >= 0 || hsp >= 0) ? cameraForwardDepth(hx, hy) : 0;
 
     if (hsp >= 0)
     {
@@ -2325,7 +3195,23 @@ static Selection pick3D(int sx, int sy)
         s.wall = hsp;
         s.sector = sprite[hsp].sectnum;
     }
-    else if (hw >= 0)
+    else
+    {
+        // Fallback editor hit-test: project all visible sprites into screen space
+        // and test the mouse against those rectangles. This makes decorative and
+        // non-blocking Duke sprites selectable in 3D mode.
+        const short screenSprite = pick3DSpriteByScreen(sx, sy, w, h, hitDepth);
+        if (screenSprite >= 0)
+        {
+            s.stat = SS_SPRITE;
+            s.wall = screenSprite;
+            s.sector = sprite[screenSprite].sectnum;
+        }
+    }
+
+    if (s.valid()) return s;
+
+    if (hw >= 0)
     {
         s.stat = (wall[hw].cstat & 16) ? SS_MASKED_WALL : SS_WALL;
         s.wall = hw;
@@ -2423,9 +3309,25 @@ static void attachEngineWindow()
     SetWindowPos(g.engine, nullptr, 0, 0, rc.right - rc.left, rc.bottom - rc.top, SWP_NOZORDER | SWP_SHOWWINDOW | SWP_FRAMECHANGED);
 }
 
+static bool has3DInputFocus()
+{
+    if (!g.main) return false;
+
+    HWND fg = GetForegroundWindow();
+    if (!fg) return false;
+    HWND root = GetAncestor(fg, GA_ROOT);
+    if (fg != g.main && root != g.main) return false;
+
+    HWND focus = GetFocus();
+    if (!focus) return true;
+    if (focus == g.main || focus == g.host3d || focus == g.engine) return true;
+    return g.host3d && IsChild(g.host3d, focus);
+}
+
 static void update3DCamera(double dt)
 {
     if (g.cam.sect < 0) updatesector(g.cam.x, g.cam.y, &g.cam.sect);
+    if (!has3DInputFocus()) return;
 
     const bool shift = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
     const long move = static_cast<long>((shift ? 12000.0 : 6000.0) * dt);
@@ -2454,8 +3356,13 @@ static void update3DCamera(double dt)
         g.cam.y += dy;
         updatesector(g.cam.x, g.cam.y, &g.cam.sect);
     }
-    if (GetAsyncKeyState(VK_PRIOR) & 0x8000) g.cam.z -= static_cast<long>(4096.0 * dt);
-    if (GetAsyncKeyState(VK_NEXT) & 0x8000) g.cam.z += static_cast<long>(4096.0 * dt);
+    // Vertical flight should feel closer to classic BUILD editor movement.
+    // Space/C and PgUp/PgDn now climb/drop much faster than the first pass.
+    const long fly = static_cast<long>((shift ? 65536.0 : 32768.0) * dt);
+    if (GetAsyncKeyState(VK_SPACE) & 0x8000) g.cam.z -= fly;
+    if (GetAsyncKeyState('C') & 0x8000) g.cam.z += fly;
+    if (GetAsyncKeyState(VK_PRIOR) & 0x8000) g.cam.z -= fly;
+    if (GetAsyncKeyState(VK_NEXT) & 0x8000) g.cam.z += fly;
 }
 
 static void render3D()
@@ -2818,7 +3725,8 @@ static void rasterize2DView(HWND hwnd)
     // Draw sprites.
     for (short i = 0; i < MAXSPRITES; ++i)
     {
-        if (sprite[i].statnum >= MAXSTATUS || sprite[i].sectnum >= MAXSECTORS) continue;
+        if (sprite[i].statnum < 0 || sprite[i].statnum >= MAXSTATUS ||
+            sprite[i].sectnum < 0 || sprite[i].sectnum >= MAXSECTORS) continue;
         int sx, sy;
         mapToScreen(hwnd, sprite[i].x, sprite[i].y, sx, sy);
         const std::uint32_t c = (g.sel.stat == SS_SPRITE && g.sel.wall == i) ? makeColor(80, 255, 80) : makeColor(80, 180, 255);
@@ -2929,20 +3837,88 @@ static void beginOrAddDrawPoint(HWND hwnd)
     InvalidateRect(hwnd, nullptr, FALSE);
 }
 
-static void insertPointAtMouse(HWND hwnd)
+static bool insertPointAtScreen(HWND hwnd, int sx, int sy)
 {
     double t = 0.0;
-    short line = nearestLineAtScreen(hwnd, g.lastMouse.x, g.lastMouse.y, &t);
-    if (line >= 0)
+    short line = nearestLineAtScreen(hwnd, sx, sy, &t);
+    if (line < 0)
     {
-        const walltype& a = wall[line];
-        const walltype& b = wall[a.point2];
-        long x = static_cast<long>(std::llround(a.x + (b.x - a.x) * t));
-        long y = static_cast<long>(std::llround(a.y + (b.y - a.y) * t));
-        snapPoint(x, y);
-        insertPointOnWall(line, x, y);
-        setStatus("Point inserted on wall %d.", line);
+        setStatus("Right-click Add Point needs the cursor near a wall.");
+        return false;
     }
+
+    const walltype& a = wall[line];
+    const walltype& b = wall[a.point2];
+    long x = static_cast<long>(std::llround(a.x + (b.x - a.x) * t));
+    long y = static_cast<long>(std::llround(a.y + (b.y - a.y) * t));
+    snapPoint(x, y);
+    if (!insertPointOnWall(line, x, y)) return false;
+    setStatus("Point inserted on wall %d.", line);
+    return true;
+}
+
+static void insertPointAtMouse(HWND hwnd)
+{
+    insertPointAtScreen(hwnd, g.lastMouse.x, g.lastMouse.y);
+}
+
+static short sectorAtMapPoint(long x, long y)
+{
+    short sect = g.cam.sect;
+    updatesector(x, y, &sect);
+    if (sect >= 0 && sect < numsectors) return sect;
+
+    for (short i = 0; i < numsectors; ++i)
+        if (inside(x, y, i) == 1) return i;
+
+    return -1;
+}
+
+static void moveCameraToMapPoint(long x, long y)
+{
+    g.cam.x = x;
+    g.cam.y = y;
+    g.cam.sect = sectorAtMapPoint(x, y);
+    g.viewX = x;
+    g.viewY = y;
+    setStatus("Camera moved to %ld,%ld%s", x, y, g.cam.sect >= 0 ? "." : " (outside sectors).");
+    refreshAllViews();
+}
+
+static void placeStartAtMapPoint(long x, long y)
+{
+    g.startx = x;
+    g.starty = y;
+    g.startz = g.cam.z;
+    g.startang = g.cam.ang;
+    g.startsect = sectorAtMapPoint(x, y);
+    setDirty();
+    setStatus("Player start placed at %ld,%ld%s", x, y, g.startsect >= 0 ? "." : " (outside sectors).");
+    refreshAllViews();
+}
+
+static void show2DContextMenu(HWND hwnd, int clientX, int clientY, long mapX, long mapY)
+{
+    HMENU menu = CreatePopupMenu();
+    if (!menu) return;
+
+    AppendMenuA(menu, MF_STRING, ids::ID_CTX_MOVE_CAMERA_HERE, "Move camera to here");
+    AppendMenuA(menu, MF_STRING, ids::ID_CTX_PLACE_START_HERE, "Place start position here");
+    AppendMenuA(menu, MF_STRING, ids::ID_CTX_ADD_POINT_HERE, "Add point here");
+    if (nearestLineAtScreen(hwnd, clientX, clientY) < 0)
+        EnableMenuItem(menu, ids::ID_CTX_ADD_POINT_HERE, MF_BYCOMMAND | MF_GRAYED);
+
+    POINT screenPt{ clientX, clientY };
+    ClientToScreen(hwnd, &screenPt);
+    const int cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, screenPt.x, screenPt.y, 0, hwnd, nullptr);
+    DestroyMenu(menu);
+
+    if (cmd == ids::ID_CTX_MOVE_CAMERA_HERE)
+        moveCameraToMapPoint(mapX, mapY);
+    else if (cmd == ids::ID_CTX_PLACE_START_HERE)
+        placeStartAtMapPoint(mapX, mapY);
+    else if (cmd == ids::ID_CTX_ADD_POINT_HERE)
+        insertPointAtScreen(hwnd, clientX, clientY);
 }
 
 static LRESULT CALLBACK View2DProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
@@ -2978,14 +3954,22 @@ static LRESULT CALLBACK View2DProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         g.lastMapMouse = mp;
         if (g.panning2D)
         {
-            const double z = static_cast<double>(g.zoom) / 16384.0;
-            if (z > 0.00001)
+            const int totalDx = p.x - g.rightClickStart.x;
+            const int totalDy = p.y - g.rightClickStart.y;
+            if (std::abs(totalDx) > 3 || std::abs(totalDy) > 3)
+                g.panning2DMoved = true;
+
+            if (g.panning2DMoved)
             {
-                g.viewX -= static_cast<long>((p.x - g.lastMouse.x) / z);
-                g.viewY -= static_cast<long>((p.y - g.lastMouse.y) / z);
+                const double z = static_cast<double>(g.zoom) / 16384.0;
+                if (z > 0.00001)
+                {
+                    g.viewX -= static_cast<long>((p.x - g.lastMouse.x) / z);
+                    g.viewY -= static_cast<long>((p.y - g.lastMouse.y) / z);
+                }
+                request2DRefresh(hwnd);
             }
             g.lastMouse = p;
-            request2DRefresh(hwnd);
         }
         else if (g.draggingPoint)
         {
@@ -3043,13 +4027,33 @@ static LRESULT CALLBACK View2DProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             return 0;
         }
 
-        short pt = nearestPointAtScreen(hwnd, g.lastMouse.x, g.lastMouse.y);
         short spr = nearestSpriteAtScreen(hwnd, g.lastMouse.x, g.lastMouse.y);
-        if (pt >= 0)
+        short pt = nearestPointAtScreen(hwnd, g.lastMouse.x, g.lastMouse.y);
+        if (spr >= 0)
         {
-            // Vertices get priority over sprites. Dense maps often have sprites
-            // near wall points; letting sprites win makes vertex dragging feel
-            // broken even though the point is visibly under the cursor.
+            // Sprite picking intentionally wins over nearby wall/sector picking.
+            // A Shift-click still lets mappers grab a vertex under a sprite.
+            if ((GetKeyState(VK_SHIFT) & 0x8000) && pt >= 0)
+            {
+                g.draggingPoint = true;
+                g.dragPointWall = pt;
+                g.dragOldX = wall[pt].x;
+                g.dragOldY = wall[pt].y;
+                g.sel.stat = SS_WALL;
+                g.sel.wall = pt;
+                g.sel.sector = ownerSectorOfWall(pt);
+            }
+            else
+            {
+                g.draggingSprite = true;
+                g.dragSprite = spr;
+                g.sel.stat = SS_SPRITE;
+                g.sel.wall = spr;
+                g.sel.sector = sprite[spr].sectnum;
+            }
+        }
+        else if (pt >= 0)
+        {
             g.draggingPoint = true;
             g.dragPointWall = pt;
             g.dragOldX = wall[pt].x;
@@ -3057,14 +4061,6 @@ static LRESULT CALLBACK View2DProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             g.sel.stat = SS_WALL;
             g.sel.wall = pt;
             g.sel.sector = ownerSectorOfWall(pt);
-        }
-        else if (spr >= 0)
-        {
-            g.draggingSprite = true;
-            g.dragSprite = spr;
-            g.sel.stat = SS_SPRITE;
-            g.sel.wall = spr;
-            g.sel.sector = sprite[spr].sectnum;
         }
         else
         {
@@ -3083,10 +4079,16 @@ static LRESULT CALLBACK View2DProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_LBUTTONUP:
     {
         const bool wasDraggingPoint = g.draggingPoint;
+        const bool wasDraggingSprite = g.draggingSprite;
         g.draggingPoint = false;
         g.draggingSprite = false;
         ReleaseCapture();
         if (wasDraggingPoint) finalizePointDrag();
+        if (wasDraggingSprite && g.dragSpriteMoved)
+        {
+            updateInspector();
+            setStatus("Sprite %d moved.", g.dragSprite);
+        }
         g.dragPointMoved = false;
         g.dragSpriteMoved = false;
         g.dragDirtySet = false;
@@ -3094,6 +4096,9 @@ static LRESULT CALLBACK View2DProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     }
     case WM_CAPTURECHANGED:
         if (g.draggingPoint) finalizePointDrag();
+        if (g.draggingSprite && g.dragSpriteMoved) updateInspector();
+        g.panning2D = false;
+        g.panning2DMoved = false;
         g.draggingPoint = false;
         g.draggingSprite = false;
         g.dragPointMoved = false;
@@ -3101,14 +4106,25 @@ static LRESULT CALLBACK View2DProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         g.dragDirtySet = false;
         return 0;
     case WM_RBUTTONDOWN:
+        SetFocus(hwnd);
         g.panning2D = true;
+        g.panning2DMoved = false;
         g.lastMouse = { GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+        g.rightClickStart = g.lastMouse;
+        g.rightClickMap = screenToMap(hwnd, g.lastMouse.x, g.lastMouse.y, false);
         SetCapture(hwnd);
         return 0;
     case WM_RBUTTONUP:
+    {
+        POINT p{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+        POINT mp = screenToMap(hwnd, p.x, p.y, false);
+        const bool showMenu = !g.panning2DMoved;
         g.panning2D = false;
+        g.panning2DMoved = false;
         ReleaseCapture();
+        if (showMenu) show2DContextMenu(hwnd, p.x, p.y, mp.x, mp.y);
         return 0;
+    }
     case WM_MOUSEWHEEL:
     {
         int delta = GET_WHEEL_DELTA_WPARAM(wp);
@@ -3149,6 +4165,31 @@ static LRESULT CALLBACK View2DProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 // -----------------------------------------------------------------------------
 // Texture bar.
 // -----------------------------------------------------------------------------
+static int currentTextureBarHeight()
+{
+    return g.textureBarExpanded ? TEXTURE_BAR_EXPANDED_HEIGHT : TEXTURE_BAR_DEFAULT_HEIGHT;
+}
+
+static RECT textureSizeButtonRect(HWND hwnd)
+{
+    RECT rc{};
+    GetClientRect(hwnd, &rc);
+    RECT button{};
+    button.left = max(8, rc.right - 104);
+    button.top = 4;
+    button.right = max(button.left + 1, rc.right - 8);
+    button.bottom = 24;
+    return button;
+}
+
+static void toggleTextureBarSize()
+{
+    g.textureBarExpanded = !g.textureBarExpanded;
+    setStatus("Texture browser %s.", g.textureBarExpanded ? "expanded" : "shrunk");
+    if (g.main) SendMessageA(g.main, WM_SIZE, 0, 0);
+    if (g.textureBar) InvalidateRect(g.textureBar, nullptr, TRUE);
+}
+
 static void drawTilePreview(HDC hdc, short tile, int x, int y, int w, int h)
 {
     if (tile < 0 || tile >= MAXTILES || tilesizx[tile] <= 0 || tilesizy[tile] <= 0)
@@ -3205,13 +4246,24 @@ static void drawTextureBar(HWND hwnd, HDC hdc)
     DeleteObject(bg);
 
     SetBkMode(hdc, TRANSPARENT);
-    SetTextColor(hdc, RGB(230, 230, 230));
+    SetTextColor(hdc, RGB(235, 235, 240));
     char top[512];
     std::snprintf(top, sizeof(top), "Tile %d   %dx%d   %s", g.selectedTile,
         (g.selectedTile >= 0 && g.selectedTile < MAXTILES) ? tilesizx[g.selectedTile] : 0,
         (g.selectedTile >= 0 && g.selectedTile < MAXTILES) ? tilesizy[g.selectedTile] : 0,
         g.status.c_str());
-    TextOutA(hdc, 8, 6, top, static_cast<int>(std::strlen(top)));
+
+    RECT clipText{ 8, 5, max(8, rc.right - 114), 24 };
+    DrawTextA(hdc, top, -1, &clipText, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
+
+    RECT sizeButton = textureSizeButtonRect(hwnd);
+    HBRUSH buttonBg = CreateSolidBrush(RGB(54, 56, 64));
+    FillRect(hdc, &sizeButton, buttonBg);
+    DeleteObject(buttonBg);
+    FrameRect(hdc, &sizeButton, reinterpret_cast<HBRUSH>(GetStockObject(GRAY_BRUSH)));
+    SetTextColor(hdc, RGB(245, 245, 245));
+    const char* sizeText = g.textureBarExpanded ? "Shrink" : "Expand";
+    DrawTextA(hdc, sizeText, -1, &sizeButton, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
     const int y0 = 28;
     const int rows = max(1, (rc.bottom - y0) / TILE_CELL);
@@ -3261,6 +4313,13 @@ static LRESULT CALLBACK TextureBarProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
         const int y0 = 28;
         const int x = GET_X_LPARAM(lp);
         const int y = GET_Y_LPARAM(lp);
+        POINT pt{ x, y };
+        RECT sizeButton = textureSizeButtonRect(hwnd);
+        if (PtInRect(&sizeButton, pt))
+        {
+            toggleTextureBarSize();
+            return 0;
+        }
         if (y < y0) return 0;
         const int cols = max(1, rc.right / TILE_CELL);
         const int col = x / TILE_CELL;
@@ -3269,8 +4328,23 @@ static LRESULT CALLBACK TextureBarProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
         if (idx >= 0 && idx < static_cast<int>(g.tileList.size()))
         {
             g.selectedTile = g.tileList[idx];
-            setStatus("Selected tile %d. Press V or Ctrl-click an object to apply.", g.selectedTile);
-            InvalidateRect(hwnd, nullptr, FALSE);
+
+            const bool clickAppliesToSelection = selectedSurfaceValid() &&
+                (g.sel.stat == SS_FLOOR || g.sel.stat == SS_CEILING || g.sel.stat == SS_SPRITE);
+            if (clickAppliesToSelection)
+            {
+                const bool changed = setSelectedPicDirect(g.selectedTile);
+                if (changed) setDirty();
+                updateInspector();
+                setStatus("Applied tile %d to %s.", g.selectedTile, selectedSurfaceName());
+                refreshAllViews();
+            }
+            else
+            {
+                setStatus("Selected tile %d. Press V or Ctrl-click an object to apply.", g.selectedTile);
+                InvalidateRect(hwnd, nullptr, FALSE);
+            }
+            updateTileArtPanel();
         }
         return 0;
     }
@@ -3290,18 +4364,1268 @@ static LRESULT CALLBACK TextureBarProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
 }
 
 // -----------------------------------------------------------------------------
-// Right-side selection inspector.
+// Tile art import/export panel.
 // -----------------------------------------------------------------------------
-static void setControlFont(HWND h)
+static void setDefaultGuiFont(HWND h)
 {
     if (h) SendMessageA(h, WM_SETFONT, reinterpret_cast<WPARAM>(GetStockObject(DEFAULT_GUI_FONT)), TRUE);
 }
 
-static HWND makeInspectorControl(HWND parent, const char* cls, const char* text, DWORD style, DWORD exStyle, int id)
+static HWND makeTileArtControl(HWND parent, const char* cls, const char* text, DWORD style, DWORD exStyle, int id)
 {
+    if (cls && std::strcmp(cls, "BUTTON") == 0) style |= BS_OWNERDRAW;
     HWND h = CreateWindowExA(exStyle, cls, text ? text : "", WS_CHILD | WS_VISIBLE | style,
         0, 0, 10, 10, parent, reinterpret_cast<HMENU>(id), g.inst, nullptr);
-    setControlFont(h);
+    setDefaultGuiFont(h);
+    return h;
+}
+
+static std::wstring widenAnsi(const std::string& s)
+{
+    if (s.empty()) return std::wstring();
+    int needed = MultiByteToWideChar(CP_ACP, 0, s.c_str(), -1, nullptr, 0);
+    if (needed <= 0) return std::wstring();
+    std::wstring out(static_cast<size_t>(needed), L'\0');
+    MultiByteToWideChar(CP_ACP, 0, s.c_str(), -1, &out[0], needed);
+    if (!out.empty() && out[out.size() - 1] == L'\0') out.resize(out.size() - 1);
+    return out;
+}
+
+static bool getPngEncoderClsid(CLSID& clsid)
+{
+    UINT num = 0, bytes = 0;
+    if (Gdiplus::GetImageEncodersSize(&num, &bytes) != Gdiplus::Ok || bytes == 0) return false;
+    std::vector<unsigned char> buffer(bytes);
+    Gdiplus::ImageCodecInfo* info = reinterpret_cast<Gdiplus::ImageCodecInfo*>(buffer.data());
+    if (Gdiplus::GetImageEncoders(num, bytes, info) != Gdiplus::Ok) return false;
+    for (UINT i = 0; i < num; ++i)
+    {
+        if (std::wcscmp(info[i].MimeType, L"image/png") == 0)
+        {
+            clsid = info[i].Clsid;
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool promptForDukeGrpPath()
+{
+    char file[MAX_PATH] = "";
+    OPENFILENAMEA ofn{};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = g.main;
+    ofn.lpstrFilter = "Duke Nukem 3D GRP (DUKE3D.GRP)\0DUKE3D.GRP;duke3d.grp\0BUILD group files (*.grp)\0*.grp\0All files (*.*)\0*.*\0";
+    ofn.lpstrFile = file;
+    ofn.nMaxFile = sizeof(file);
+    ofn.Flags = OFN_FILEMUSTEXIST | OFN_HIDEREADONLY;
+    ofn.lpstrDefExt = "grp";
+    if (!GetOpenFileNameA(&ofn)) return false;
+
+    g.dukeGrpPath = fullPathOf(file);
+    g.grpEditPath = g.dukeGrpPath;
+    if (g.grpExportPath.empty()) g.grpExportPath = pathJoin(pathDirectory(g.grpEditPath), "grp_export");
+    updateGrpEditPanel();
+    if (!loadPaletteFromGrp(g.dukeGrpPath.c_str()))
+    {
+        MessageBoxA(g.main, "The selected GRP did not contain a readable PALETTE.DAT.", "Tile art", MB_ICONWARNING);
+    }
+    updateTileArtPanel();
+    refreshAllViews();
+    return true;
+}
+
+static bool ensureDukeGrpPath()
+{
+    if (!g.dukeGrpPath.empty() && fileExistsA(g.dukeGrpPath.c_str())) return true;
+    if (!g.boardGrpPath.empty() && fileExistsA(g.boardGrpPath.c_str()))
+    {
+        g.dukeGrpPath = fullPathOf(g.boardGrpPath.c_str());
+        loadPaletteFromGrp(g.dukeGrpPath.c_str());
+        return true;
+    }
+    if (fileExistsA("DUKE3D.GRP"))
+    {
+        g.dukeGrpPath = fullPathOf("DUKE3D.GRP");
+        loadPaletteFromGrp(g.dukeGrpPath.c_str());
+        return true;
+    }
+    if (fileExistsA("duke3d.grp"))
+    {
+        g.dukeGrpPath = fullPathOf("duke3d.grp");
+        loadPaletteFromGrp(g.dukeGrpPath.c_str());
+        return true;
+    }
+    return promptForDukeGrpPath();
+}
+
+static std::string artSaveFolder()
+{
+    if (!ensureDukeGrpPath()) return std::string();
+    return pathDirectory(g.dukeGrpPath);
+}
+
+static bool readTileArtTileNumber(short& tile)
+{
+    char buf[64] = {};
+    if (!g.artTileEdit) { tile = g.selectedTile; return true; }
+    GetWindowTextA(g.artTileEdit, buf, sizeof(buf));
+    char* end = nullptr;
+    long value = std::strtol(buf, &end, 0);
+    while (end && (*end == ' ' || *end == '\t')) ++end;
+    if (!buf[0] || !end || *end != 0)
+    {
+        MessageBoxA(g.main, "Tile number must be a valid number.", "Tile art", MB_ICONERROR);
+        SetFocus(g.artTileEdit);
+        return false;
+    }
+    value = clamp_long(value, 0, MAXTILES - 1);
+    tile = static_cast<short>(value);
+    return true;
+}
+
+static void updateTileArtPanel()
+{
+    if (!g.tileArt) return;
+
+    if (g.artTileEdit)
+    {
+        char buf[32];
+        std::snprintf(buf, sizeof(buf), "%d", g.selectedTile);
+        SetWindowTextA(g.artTileEdit, buf);
+    }
+
+    if (g.artStatusLabel)
+    {
+        char text[512];
+        const std::string grp = g.dukeGrpPath.empty() ? std::string("No DUKE3D.GRP selected") : pathBaseNameString(g.dukeGrpPath);
+        const bool dirty = g.artDirty;
+        std::snprintf(text, sizeof(text), "Tile %d   %dx%d   %s   GRP: %s",
+            g.selectedTile,
+            (g.selectedTile >= 0 && g.selectedTile < MAXTILES) ? tilesizx[g.selectedTile] : 0,
+            (g.selectedTile >= 0 && g.selectedTile < MAXTILES) ? tilesizy[g.selectedTile] : 0,
+            dirty ? "unsaved ART changes" : "ART saved",
+            grp.c_str());
+        SetWindowTextA(g.artStatusLabel, text);
+    }
+    InvalidateRect(g.tileArt, nullptr, FALSE);
+}
+
+static unsigned char nearestDukePaletteIndex(std::uint8_t r, std::uint8_t gr, std::uint8_t b)
+{
+    int best = 0;
+    long bestDist = 0x7fffffffL;
+    // Index 255 is treated as transparent in Build art, so keep it for alpha.
+    for (int i = 0; i < 255; ++i)
+    {
+        const int pr = static_cast<unsigned char>(palette[i * 3 + 0]) << 2;
+        const int pg = static_cast<unsigned char>(palette[i * 3 + 1]) << 2;
+        const int pb = static_cast<unsigned char>(palette[i * 3 + 2]) << 2;
+        const long dr = static_cast<long>(r) - pr;
+        const long dg = static_cast<long>(gr) - pg;
+        const long db = static_cast<long>(b) - pb;
+        const long d = dr * dr + dg * dg + db * db;
+        if (d < bestDist)
+        {
+            bestDist = d;
+            best = i;
+            if (d == 0) break;
+        }
+    }
+    return static_cast<unsigned char>(best);
+}
+
+static bool setTilePixelsFromIndexed(short tile, int w, int h, const std::vector<unsigned char>& pixels, bool dirty)
+{
+    if (tile < 0 || tile >= MAXTILES || w <= 0 || h <= 0 || w > 32767 || h > 32767) return false;
+    if (pixels.size() != static_cast<size_t>(w) * static_cast<size_t>(h)) return false;
+
+    TileOverride& ov = g.tileOverrides[tile];
+    ov.pixels = pixels;
+    ov.w = static_cast<short>(w);
+    ov.h = static_cast<short>(h);
+    ov.picanmValue = picanm[tile];
+    ov.dirty = ov.dirty || dirty;
+
+    tilesizx[tile] = ov.w;
+    tilesizy[tile] = ov.h;
+    picanm[tile] = ov.picanmValue;
+    waloff[tile] = static_cast<long>(reinterpret_cast<std::intptr_t>(ov.pixels.data()));
+
+    g.selectedTile = tile;
+    refreshTileList();
+    centerTextureBarOnSelected();
+    if (dirty) setArtDirty(true);
+    updateTileArtPanel();
+    refreshAllViews();
+    return true;
+}
+
+static bool importSelectedTileFromPng()
+{
+    if (!g.gdiplusToken)
+    {
+        MessageBoxA(g.main, "Windows GDI+ is not available, so PNG import cannot run.", "Import tile", MB_ICONERROR);
+        return false;
+    }
+    short tile = g.selectedTile;
+    if (!readTileArtTileNumber(tile)) return false;
+    if (!ensureDukeGrpPath()) return false;
+    loadPaletteFromGrp(g.dukeGrpPath.c_str());
+
+    char file[MAX_PATH] = "";
+    OPENFILENAMEA ofn{};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = g.main;
+    ofn.lpstrFilter = "PNG images (*.png)\0*.png\0All files (*.*)\0*.*\0";
+    ofn.lpstrFile = file;
+    ofn.nMaxFile = sizeof(file);
+    ofn.Flags = OFN_FILEMUSTEXIST | OFN_HIDEREADONLY;
+    ofn.lpstrDefExt = "png";
+    if (!GetOpenFileNameA(&ofn)) return false;
+
+    std::wstring wide = widenAnsi(file);
+    Gdiplus::Bitmap bmp(wide.c_str());
+    if (bmp.GetLastStatus() != Gdiplus::Ok || bmp.GetWidth() == 0 || bmp.GetHeight() == 0)
+    {
+        MessageBoxA(g.main, "Could not load that PNG image.", "Import tile", MB_ICONERROR);
+        return false;
+    }
+    if (bmp.GetWidth() > 4096 || bmp.GetHeight() > 4096)
+    {
+        MessageBoxA(g.main, "That PNG is too large for this editor tile import path.", "Import tile", MB_ICONERROR);
+        return false;
+    }
+
+    const int w = static_cast<int>(bmp.GetWidth());
+    const int h = static_cast<int>(bmp.GetHeight());
+    std::vector<unsigned char> indexed(static_cast<size_t>(w) * h, 255);
+    for (int y = 0; y < h; ++y)
+    {
+        for (int x = 0; x < w; ++x)
+        {
+            Gdiplus::Color c;
+            bmp.GetPixel(x, y, &c);
+            const unsigned char idx = (c.GetA() < 128) ? 255 : nearestDukePaletteIndex(c.GetR(), c.GetG(), c.GetB());
+            indexed[static_cast<size_t>(x) * h + y] = idx; // ART column-major.
+        }
+    }
+
+    if (!setTilePixelsFromIndexed(tile, w, h, indexed, true))
+    {
+        MessageBoxA(g.main, "Could not apply the PNG to that tile.", "Import tile", MB_ICONERROR);
+        return false;
+    }
+
+    setStatus("Imported PNG into tile %d. Use File > Save or Save ART files to write TILES%03d.ART next to the GRP.", tile, tile / 256);
+    return true;
+}
+
+static bool exportSelectedTileToPng()
+{
+    if (!g.gdiplusToken)
+    {
+        MessageBoxA(g.main, "Windows GDI+ is not available, so PNG export cannot run.", "Export tile", MB_ICONERROR);
+        return false;
+    }
+    short tile = g.selectedTile;
+    if (!readTileArtTileNumber(tile)) return false;
+    g.selectedTile = tile;
+    centerTextureBarOnSelected();
+    if (tile < 0 || tile >= MAXTILES || tilesizx[tile] <= 0 || tilesizy[tile] <= 0)
+    {
+        MessageBoxA(g.main, "That tile is empty.", "Export tile", MB_ICONINFORMATION);
+        return false;
+    }
+    if (!waloff[tile]) loadtile(tile);
+    const unsigned char* src = reinterpret_cast<const unsigned char*>(static_cast<std::intptr_t>(waloff[tile]));
+    if (!src)
+    {
+        MessageBoxA(g.main, "Could not load that tile's art data.", "Export tile", MB_ICONERROR);
+        return false;
+    }
+
+    char defaultName[MAX_PATH] = {};
+    std::snprintf(defaultName, sizeof(defaultName), "tile%04d.png", tile);
+    OPENFILENAMEA ofn{};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = g.main;
+    ofn.lpstrFilter = "PNG images (*.png)\0*.png\0All files (*.*)\0*.*\0";
+    ofn.lpstrFile = defaultName;
+    ofn.nMaxFile = sizeof(defaultName);
+    ofn.Flags = OFN_OVERWRITEPROMPT | OFN_HIDEREADONLY;
+    ofn.lpstrDefExt = "png";
+    if (!GetSaveFileNameA(&ofn)) return false;
+
+    const int w = tilesizx[tile];
+    const int h = tilesizy[tile];
+    Gdiplus::Bitmap out(w, h, PixelFormat32bppARGB);
+    for (int y = 0; y < h; ++y)
+    {
+        for (int x = 0; x < w; ++x)
+        {
+            const unsigned char idx = src[static_cast<size_t>(x) * h + y];
+            if (idx == 255)
+            {
+                out.SetPixel(x, y, Gdiplus::Color(0, 0, 0, 0));
+            }
+            else
+            {
+                const BYTE r = static_cast<BYTE>(static_cast<unsigned char>(palette[idx * 3 + 0]) << 2);
+                const BYTE gr = static_cast<BYTE>(static_cast<unsigned char>(palette[idx * 3 + 1]) << 2);
+                const BYTE b = static_cast<BYTE>(static_cast<unsigned char>(palette[idx * 3 + 2]) << 2);
+                out.SetPixel(x, y, Gdiplus::Color(255, r, gr, b));
+            }
+        }
+    }
+
+    CLSID pngClsid{};
+    if (!getPngEncoderClsid(pngClsid))
+    {
+        MessageBoxA(g.main, "Could not find the Windows PNG encoder.", "Export tile", MB_ICONERROR);
+        return false;
+    }
+    std::wstring wide = widenAnsi(defaultName);
+    if (out.Save(wide.c_str(), &pngClsid, nullptr) != Gdiplus::Ok)
+    {
+        MessageBoxA(g.main, "Could not save the PNG file.", "Export tile", MB_ICONERROR);
+        return false;
+    }
+
+    setStatus("Exported tile %d to PNG.", tile);
+    return true;
+}
+
+static bool writeLe16(FILE* f, int value)
+{
+    unsigned char b[2] = {
+        static_cast<unsigned char>(value & 255),
+        static_cast<unsigned char>((value >> 8) & 255)
+    };
+    return std::fwrite(b, 1, 2, f) == 2;
+}
+
+static bool writeLe32(FILE* f, long value)
+{
+    const std::uint32_t v = static_cast<std::uint32_t>(value);
+    unsigned char b[4] = {
+        static_cast<unsigned char>(v & 255),
+        static_cast<unsigned char>((v >> 8) & 255),
+        static_cast<unsigned char>((v >> 16) & 255),
+        static_cast<unsigned char>((v >> 24) & 255)
+    };
+    return std::fwrite(b, 1, 4, f) == 4;
+}
+
+// -----------------------------------------------------------------------------
+// GRP editor panel helpers.
+// -----------------------------------------------------------------------------
+static bool directoryExistsA(const char* path)
+{
+    if (!path || !path[0]) return false;
+    const DWORD attr = GetFileAttributesA(path);
+    return attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY) != 0;
+}
+
+static bool ensureDirectoryTreeA(const std::string& folder)
+{
+    if (folder.empty()) return false;
+    if (directoryExistsA(folder.c_str())) return true;
+
+    std::string path = folder;
+    std::replace(path.begin(), path.end(), '/', '\\');
+    while (!path.empty() && (path[path.size() - 1] == '\\' || path[path.size() - 1] == '/'))
+        path.resize(path.size() - 1);
+    if (path.empty()) return false;
+
+    size_t start = 0;
+    if (path.size() >= 2 && path[1] == ':') start = 2;
+    if (path.size() >= 2 && path[0] == '\\' && path[1] == '\\')
+    {
+        size_t server = path.find('\\', 2);
+        if (server != std::string::npos)
+        {
+            size_t share = path.find('\\', server + 1);
+            if (share != std::string::npos) start = share;
+        }
+    }
+
+    for (size_t pos = path.find('\\', start + 1); pos != std::string::npos; pos = path.find('\\', pos + 1))
+    {
+        const std::string part = path.substr(0, pos);
+        if (!part.empty() && !directoryExistsA(part.c_str()))
+            CreateDirectoryA(part.c_str(), nullptr);
+    }
+
+    if (directoryExistsA(path.c_str())) return true;
+    if (CreateDirectoryA(path.c_str(), nullptr)) return true;
+    return GetLastError() == ERROR_ALREADY_EXISTS && directoryExistsA(path.c_str());
+}
+
+static bool readFileBytesA(const std::string& path, std::vector<unsigned char>& bytes)
+{
+    bytes.clear();
+    HANDLE h = CreateFileA(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return false;
+
+    LARGE_INTEGER size{};
+    if (!GetFileSizeEx(h, &size) || size.QuadPart < 0 || size.QuadPart > 0xffffffffll)
+    {
+        CloseHandle(h);
+        return false;
+    }
+
+    bytes.resize(static_cast<size_t>(size.QuadPart));
+    size_t offset = 0;
+    while (offset < bytes.size())
+    {
+        const DWORD want = static_cast<DWORD>(std::min<size_t>(64 * 1024, bytes.size() - offset));
+        DWORD got = 0;
+        if (!ReadFile(h, bytes.data() + offset, want, &got, nullptr) || got == 0)
+        {
+            CloseHandle(h);
+            bytes.clear();
+            return false;
+        }
+        offset += got;
+    }
+
+    CloseHandle(h);
+    return true;
+}
+
+static bool writeFileBytesA(const std::string& path, const std::vector<unsigned char>& bytes)
+{
+    FILE* f = nullptr;
+    if (fopen_s(&f, path.c_str(), "wb") != 0 || !f) return false;
+    const bool ok = bytes.empty() || std::fwrite(bytes.data(), 1, bytes.size(), f) == bytes.size();
+    std::fclose(f);
+    if (!ok) DeleteFileA(path.c_str());
+    return ok;
+}
+
+static std::string sanitizeGrpEntryName(const std::string& sourcePath)
+{
+    std::string name = pathBaseNameString(sourcePath);
+    if (name.empty()) name = "IMPORT.BIN";
+
+    for (char& ch : name)
+    {
+        if (ch >= 'a' && ch <= 'z') ch = static_cast<char>(ch - 'a' + 'A');
+        if (ch == '<' || ch == '>' || ch == ':' || ch == '"' || ch == '/' || ch == '\\' ||
+            ch == '|' || ch == '?' || ch == '*' || static_cast<unsigned char>(ch) < 32)
+            ch = '_';
+    }
+
+    if (name.size() > 12) name.resize(12);
+    while (!name.empty() && name[name.size() - 1] == ' ') name.resize(name.size() - 1);
+    if (name.empty()) name = "IMPORT.BIN";
+    return name;
+}
+
+static std::string defaultGrpExportPath()
+{
+    std::string base;
+    if (!g.grpEditPath.empty()) base = pathDirectory(g.grpEditPath);
+    else if (!g.dukeGrpPath.empty()) base = pathDirectory(g.dukeGrpPath);
+    else if (!g.boardGrpPath.empty()) base = pathDirectory(g.boardGrpPath);
+    else base = moduleDirectory();
+    return pathJoin(base, "grp_export");
+}
+
+static void syncGrpExportPathFromEdit()
+{
+    if (!g.grpExportPathEdit) return;
+    char buf[MAX_PATH * 2] = {};
+    GetWindowTextA(g.grpExportPathEdit, buf, sizeof(buf));
+    if (buf[0]) g.grpExportPath = buf;
+}
+
+static bool promptSelectGrpForEditor()
+{
+    char file[MAX_PATH] = "";
+    if (!g.grpEditPath.empty())
+        std::strncpy(file, g.grpEditPath.c_str(), sizeof(file) - 1);
+    else if (!g.dukeGrpPath.empty())
+        std::strncpy(file, g.dukeGrpPath.c_str(), sizeof(file) - 1);
+
+    OPENFILENAMEA ofn{};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = g.main;
+    ofn.lpstrFilter = "BUILD group files (*.grp)\0*.grp\0All files (*.*)\0*.*\0";
+    ofn.lpstrFile = file;
+    ofn.nMaxFile = sizeof(file);
+    ofn.Flags = OFN_FILEMUSTEXIST | OFN_HIDEREADONLY;
+    ofn.lpstrDefExt = "grp";
+    if (!GetOpenFileNameA(&ofn)) return false;
+
+    std::vector<GrpMapEntry> entries;
+    if (!readGrpEntries(file, entries))
+    {
+        MessageBoxA(g.main, "Could not read that GRP file. Make sure it is a Ken Silverman BUILD .grp file.", "GRP Edit", MB_ICONERROR);
+        return false;
+    }
+
+    g.grpEditPath = fullPathOf(file);
+    if (g.dukeGrpPath.empty()) g.dukeGrpPath = g.grpEditPath;
+    if (g.grpExportPath.empty()) g.grpExportPath = defaultGrpExportPath();
+    loadPaletteFromGrp(g.grpEditPath.c_str());
+    updateGrpEditPanel();
+    setStatus("GRP editor opened %s.", pathBaseNameString(g.grpEditPath).c_str());
+    return true;
+}
+
+static bool ensureGrpEditorPath(bool prompt)
+{
+    if (!g.grpEditPath.empty() && fileExistsA(g.grpEditPath.c_str())) return true;
+
+    if (!g.dukeGrpPath.empty() && fileExistsA(g.dukeGrpPath.c_str()))
+    {
+        g.grpEditPath = g.dukeGrpPath;
+        if (g.grpExportPath.empty()) g.grpExportPath = defaultGrpExportPath();
+        updateGrpEditPanel();
+        return true;
+    }
+
+    if (!g.boardGrpPath.empty() && fileExistsA(g.boardGrpPath.c_str()))
+    {
+        g.grpEditPath = g.boardGrpPath;
+        if (g.grpExportPath.empty()) g.grpExportPath = defaultGrpExportPath();
+        updateGrpEditPanel();
+        return true;
+    }
+
+    return prompt ? promptSelectGrpForEditor() : false;
+}
+
+static void updateGrpEditPanel()
+{
+    if (!g.grpEdit) return;
+
+    if (g.grpExportPath.empty()) g.grpExportPath = defaultGrpExportPath();
+    if (g.grpExportPathEdit) SetWindowTextA(g.grpExportPathEdit, g.grpExportPath.c_str());
+
+    if (g.grpPathLabel)
+    {
+        char text[MAX_PATH * 2] = {};
+        if (!g.grpEditPath.empty())
+            std::snprintf(text, sizeof(text), "GRP: %s", g.grpEditPath.c_str());
+        else
+            std::snprintf(text, sizeof(text), "GRP: no file selected");
+        SetWindowTextA(g.grpPathLabel, text);
+    }
+
+    if (g.grpList)
+    {
+        SendMessageA(g.grpList, LB_RESETCONTENT, 0, 0);
+        std::vector<GrpMapEntry> entries;
+        if (!g.grpEditPath.empty() && readGrpEntries(g.grpEditPath.c_str(), entries))
+        {
+            for (size_t i = 0; i < entries.size(); ++i)
+            {
+                char row[256] = {};
+                std::snprintf(row, sizeof(row), "%3d  %-12s  %10u bytes", static_cast<int>(i), entries[i].name.c_str(), entries[i].size);
+                SendMessageA(g.grpList, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(row));
+            }
+        }
+    }
+
+    InvalidateRect(g.grpEdit, nullptr, FALSE);
+}
+
+static bool promptGrpExportPath(const char* title)
+{
+    syncGrpExportPathFromEdit();
+    std::string folder = g.grpExportPath.empty() ? defaultGrpExportPath() : g.grpExportPath;
+    if (!promptString(title ? title : "GRP export path", "Export folder:", folder)) return false;
+    g.grpExportPath = folder;
+    if (g.grpExportPathEdit) SetWindowTextA(g.grpExportPathEdit, g.grpExportPath.c_str());
+    return true;
+}
+
+static std::vector<int> selectedGrpEntryIndices()
+{
+    std::vector<int> indices;
+    if (!g.grpList) return indices;
+
+    const int selCount = static_cast<int>(SendMessageA(g.grpList, LB_GETSELCOUNT, 0, 0));
+    if (selCount > 0 && selCount != LB_ERR)
+    {
+        indices.resize(selCount);
+        const int got = static_cast<int>(SendMessageA(g.grpList, LB_GETSELITEMS, selCount, reinterpret_cast<LPARAM>(indices.data())));
+        if (got > 0) indices.resize(got);
+        else indices.clear();
+    }
+
+    // Fallback for the listbox caret/current selection, useful on double-clicks.
+    if (indices.empty())
+    {
+        const int sel = static_cast<int>(SendMessageA(g.grpList, LB_GETCURSEL, 0, 0));
+        if (sel != LB_ERR) indices.push_back(sel);
+    }
+
+    std::sort(indices.begin(), indices.end());
+    indices.erase(std::unique(indices.begin(), indices.end()), indices.end());
+    return indices;
+}
+
+static bool extractGrpEntriesToFolderByIndices(const std::vector<int>& requestedIndices)
+{
+    if (!ensureGrpEditorPath(true)) return false;
+    syncGrpExportPathFromEdit();
+    if (g.grpExportPath.empty()) g.grpExportPath = defaultGrpExportPath();
+    if (!ensureDirectoryTreeA(g.grpExportPath))
+    {
+        MessageBoxA(g.main, "Could not create the export folder.", "GRP Extract", MB_ICONERROR);
+        return false;
+    }
+
+    std::vector<GrpMapEntry> entries;
+    if (!readGrpEntries(g.grpEditPath.c_str(), entries))
+    {
+        MessageBoxA(g.main, "Could not read the GRP file.", "GRP Extract", MB_ICONERROR);
+        return false;
+    }
+
+    std::vector<int> indices;
+    for (int index : requestedIndices)
+        if (index >= 0 && index < static_cast<int>(entries.size())) indices.push_back(index);
+    std::sort(indices.begin(), indices.end());
+    indices.erase(std::unique(indices.begin(), indices.end()), indices.end());
+
+    if (indices.empty())
+    {
+        MessageBoxA(g.main, "Select one or more GRP entries to extract.", "GRP Extract", MB_ICONINFORMATION);
+        return false;
+    }
+
+    if (indices.size() > 1)
+    {
+        char msg[512] = {};
+        std::snprintf(msg, sizeof(msg), "Extract %d selected GRP entr%s to:\r\n%s\r\n\r\nExisting files with the same names will ask before being overwritten.",
+            static_cast<int>(indices.size()), indices.size() == 1 ? "y" : "ies", g.grpExportPath.c_str());
+        if (MessageBoxA(g.main, msg, "GRP Extract", MB_ICONQUESTION | MB_YESNO) != IDYES)
+            return false;
+    }
+
+    int written = 0;
+    int skipped = 0;
+    for (int index : indices)
+    {
+        std::vector<unsigned char> bytes;
+        if (!readGrpEntryBytes(g.grpEditPath.c_str(), entries[index], bytes))
+        {
+            ++skipped;
+            continue;
+        }
+
+        const std::string outPath = pathJoin(g.grpExportPath, sanitizeFileName(entries[index].name));
+        if (fileExistsA(outPath.c_str()))
+        {
+            char msg[MAX_PATH * 2] = {};
+            std::snprintf(msg, sizeof(msg), "%s already exists. Overwrite it?", outPath.c_str());
+            const int r = MessageBoxA(g.main, msg, "GRP Extract", MB_ICONQUESTION | MB_YESNOCANCEL);
+            if (r == IDCANCEL) break;
+            if (r != IDYES)
+            {
+                ++skipped;
+                continue;
+            }
+        }
+
+        if (writeFileBytesA(outPath, bytes)) ++written;
+        else ++skipped;
+    }
+
+    if (indices.size() == 1 && written == 1)
+        setStatus("Extracted %s to %s.", entries[indices[0]].name.c_str(), g.grpExportPath.c_str());
+    else
+        setStatus("Extracted %d of %d selected GRP entr%s to %s%s.", written, static_cast<int>(indices.size()),
+            indices.size() == 1 ? "y" : "ies", g.grpExportPath.c_str(), skipped ? " (some skipped)" : "");
+    return written > 0 && skipped == 0;
+}
+
+static bool extractGrpEntryToFolderByIndex(int index)
+{
+    std::vector<int> single;
+    single.push_back(index);
+    return extractGrpEntriesToFolderByIndices(single);
+}
+
+static bool extractAllGrpEntries()
+{
+    if (!ensureGrpEditorPath(true)) return false;
+    if (!promptGrpExportPath("Extract all GRP files")) return false;
+    if (!ensureDirectoryTreeA(g.grpExportPath))
+    {
+        MessageBoxA(g.main, "Could not create the export folder.", "GRP Extract All", MB_ICONERROR);
+        return false;
+    }
+
+    std::vector<GrpMapEntry> entries;
+    if (!readGrpEntries(g.grpEditPath.c_str(), entries))
+    {
+        MessageBoxA(g.main, "Could not read the GRP file.", "GRP Extract All", MB_ICONERROR);
+        return false;
+    }
+    if (entries.empty())
+    {
+        MessageBoxA(g.main, "That GRP has no entries.", "GRP Extract All", MB_ICONINFORMATION);
+        return false;
+    }
+
+    char msg[512] = {};
+    std::snprintf(msg, sizeof(msg), "Extract %d file(s) to:\r\n%s\r\n\r\nExisting files with the same names will be overwritten.",
+        static_cast<int>(entries.size()), g.grpExportPath.c_str());
+    if (MessageBoxA(g.main, msg, "GRP Extract All", MB_ICONQUESTION | MB_YESNO) != IDYES)
+        return false;
+
+    int written = 0;
+    for (const GrpMapEntry& e : entries)
+    {
+        std::vector<unsigned char> bytes;
+        if (!readGrpEntryBytes(g.grpEditPath.c_str(), e, bytes)) continue;
+        const std::string outPath = pathJoin(g.grpExportPath, sanitizeFileName(e.name));
+        if (writeFileBytesA(outPath, bytes)) ++written;
+    }
+
+    setStatus("Extracted %d of %d GRP file(s) to %s.", written, static_cast<int>(entries.size()), g.grpExportPath.c_str());
+    return written == static_cast<int>(entries.size());
+}
+
+static std::vector<std::string> parseMultiSelectFileBuffer(const char* buffer)
+{
+    std::vector<std::string> paths;
+    if (!buffer || !buffer[0]) return paths;
+
+    const char* p = buffer;
+    std::string first = p;
+    p += first.size() + 1;
+    if (!*p)
+    {
+        paths.push_back(first);
+        return paths;
+    }
+
+    const std::string folder = first;
+    while (*p)
+    {
+        std::string file = p;
+        paths.push_back(pathJoin(folder, file));
+        p += file.size() + 1;
+    }
+    return paths;
+}
+
+static bool writeGrpFileAtomically(const std::string& path, const std::vector<GrpMapEntry>& entries, const std::vector<std::vector<unsigned char> >& data)
+{
+    if (entries.size() != data.size() || entries.size() > 0xffffffffull) return false;
+
+    const std::string tempPath = path + ".tmp";
+    FILE* f = nullptr;
+    if (fopen_s(&f, tempPath.c_str(), "wb") != 0 || !f) return false;
+
+    bool ok = std::fwrite("KenSilverman", 1, 12, f) == 12;
+    ok = ok && writeLe32(f, static_cast<long>(entries.size()));
+
+    for (size_t i = 0; ok && i < entries.size(); ++i)
+    {
+        char rawName[12] = {};
+        const size_t copy = std::min<size_t>(12, entries[i].name.size());
+        if (copy > 0) std::memcpy(rawName, entries[i].name.data(), copy);
+        ok = std::fwrite(rawName, 1, 12, f) == 12;
+        ok = ok && writeLe32(f, static_cast<long>(data[i].size()));
+    }
+
+    for (size_t i = 0; ok && i < data.size(); ++i)
+    {
+        if (!data[i].empty())
+            ok = std::fwrite(data[i].data(), 1, data[i].size(), f) == data[i].size();
+    }
+
+    std::fclose(f);
+    if (!ok)
+    {
+        DeleteFileA(tempPath.c_str());
+        return false;
+    }
+
+    if (!MoveFileExA(tempPath.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+    {
+        DeleteFileA(tempPath.c_str());
+        return false;
+    }
+    return true;
+}
+
+static bool importFilesIntoGrp(const std::vector<std::string>& paths)
+{
+    if (paths.empty()) return false;
+    if (!ensureGrpEditorPath(true)) return false;
+
+    char msg[512] = {};
+    std::snprintf(msg, sizeof(msg), "Import %d file(s) into:\r\n%s\r\n\r\nThe GRP will be rewritten. Existing matching 12-character entry names will be replaced.",
+        static_cast<int>(paths.size()), g.grpEditPath.c_str());
+    if (MessageBoxA(g.main, msg, "GRP Import", MB_ICONQUESTION | MB_YESNO) != IDYES)
+        return false;
+
+    std::vector<GrpMapEntry> entries;
+    if (!readGrpEntries(g.grpEditPath.c_str(), entries))
+    {
+        MessageBoxA(g.main, "Could not read the GRP file before importing.", "GRP Import", MB_ICONERROR);
+        return false;
+    }
+
+    std::vector<std::vector<unsigned char> > data(entries.size());
+    for (size_t i = 0; i < entries.size(); ++i)
+    {
+        if (!readGrpEntryBytes(g.grpEditPath.c_str(), entries[i], data[i]))
+        {
+            MessageBoxA(g.main, "Could not read every current GRP entry. Import was canceled.", "GRP Import", MB_ICONERROR);
+            return false;
+        }
+    }
+
+    int imported = 0;
+    for (const std::string& path : paths)
+    {
+        std::vector<unsigned char> bytes;
+        if (!readFileBytesA(path, bytes)) continue;
+
+        const std::string entryName = sanitizeGrpEntryName(path);
+        const std::string key = upperAscii(entryName);
+        int existing = -1;
+        for (int i = 0; i < static_cast<int>(entries.size()); ++i)
+        {
+            if (upperAscii(entries[i].name) == key)
+            {
+                existing = i;
+                break;
+            }
+        }
+
+        if (existing >= 0)
+        {
+            data[existing] = bytes;
+            entries[existing].size = static_cast<std::uint32_t>(bytes.size());
+        }
+        else
+        {
+            GrpMapEntry e;
+            e.name = entryName;
+            e.offset = 0;
+            e.size = static_cast<std::uint32_t>(bytes.size());
+            entries.push_back(e);
+            data.push_back(bytes);
+        }
+        ++imported;
+    }
+
+    if (imported <= 0)
+    {
+        MessageBoxA(g.main, "None of the selected files could be imported.", "GRP Import", MB_ICONERROR);
+        return false;
+    }
+
+    if (!writeGrpFileAtomically(g.grpEditPath, entries, data))
+    {
+        MessageBoxA(g.main, "Could not rewrite the GRP file.", "GRP Import", MB_ICONERROR);
+        return false;
+    }
+
+    updateGrpEditPanel();
+    refreshTileList();
+    setStatus("Imported %d file(s) into %s.", imported, pathBaseNameString(g.grpEditPath).c_str());
+    return true;
+}
+
+static bool promptImportFilesIntoGrp()
+{
+    if (!ensureGrpEditorPath(true)) return false;
+
+    std::vector<char> fileBuffer(32768, 0);
+    OPENFILENAMEA ofn{};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = g.main;
+    ofn.lpstrFilter = "All files (*.*)\0*.*\0";
+    ofn.lpstrFile = fileBuffer.data();
+    ofn.nMaxFile = static_cast<DWORD>(fileBuffer.size());
+    ofn.Flags = OFN_FILEMUSTEXIST | OFN_HIDEREADONLY | OFN_ALLOWMULTISELECT | OFN_EXPLORER;
+    if (!GetOpenFileNameA(&ofn)) return false;
+
+    return importFilesIntoGrp(parseMultiSelectFileBuffer(fileBuffer.data()));
+}
+
+static void layoutGrpEditControls(HWND hwnd)
+{
+    RECT rc{};
+    GetClientRect(hwnd, &rc);
+    const int W = max(1, rc.right - rc.left);
+    const int H = max(1, rc.bottom - rc.top);
+    const int m = 14;
+    int y = 12;
+
+    moveCtl(g.grpPathLabel, m, y, W - 2 * m - 230, 22);
+    moveCtl(g.grpSelectButton, W - m - 220, y, 112, 25);
+    moveCtl(g.grpRefreshButton, W - m - 104, y, 104, 25);
+    y += 36;
+
+    HWND exportLabel = GetDlgItem(hwnd, 1410);
+    moveCtl(exportLabel, m, y + 4, 86, 20);
+    moveCtl(g.grpExportPathEdit, m + 92, y, max(120, W - (m + 92) - 126 - m), 24);
+    moveCtl(g.grpChangeExportPathButton, W - m - 118, y, 118, 25);
+    y += 38;
+
+    const int buttonsH = 40;
+    moveCtl(g.grpList, m, y, W - 2 * m, max(80, H - y - buttonsH - m));
+
+    const int by = H - buttonsH + 6;
+    const int buttonW = max(118, (W - 5 * m) / 4);
+    int bx = m;
+    moveCtl(g.grpExtractButton, bx, by, buttonW, 28); bx += buttonW + m;
+    moveCtl(g.grpExtractAllButton, bx, by, buttonW, 28); bx += buttonW + m;
+    moveCtl(g.grpImportButton, bx, by, buttonW, 28);
+}
+
+static void drawGrpEditPanel(HWND hwnd, HDC hdc)
+{
+    RECT rc{};
+    GetClientRect(hwnd, &rc);
+    fillRectColor(hdc, rc, theme::WindowBg);
+
+    SetBkMode(hdc, TRANSPARENT);
+    SetTextColor(hdc, theme::MutedText);
+    HFONT oldFont = reinterpret_cast<HFONT>(SelectObject(hdc, GetStockObject(DEFAULT_GUI_FONT)));
+    const char* note = "GRP Edit: select a GRP, choose an export folder, extract one/all entries, or import files into the archive.";
+    RECT textRc{ 14, max(0, rc.bottom - 20), max(15, rc.right - 14), max(1, rc.bottom - 4) };
+    DrawTextA(hdc, note, -1, &textRc, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+    SelectObject(hdc, oldFont);
+}
+
+static LRESULT CALLBACK GrpEditProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
+{
+    switch (msg)
+    {
+    case WM_CREATE:
+        g.grpPathLabel = makeTileArtControl(hwnd, "STATIC", "GRP: no file selected", SS_LEFT, 0, 1409);
+        g.grpSelectButton = makeTileArtControl(hwnd, "BUTTON", "Select GRP...", BS_PUSHBUTTON, 0, ids::ID_GRP_SELECT_GRP);
+        g.grpRefreshButton = makeTileArtControl(hwnd, "BUTTON", "Refresh", BS_PUSHBUTTON, 0, ids::ID_GRP_REFRESH);
+        makeTileArtControl(hwnd, "STATIC", "Export folder", SS_LEFT, 0, 1410);
+        g.grpExportPathEdit = makeTileArtControl(hwnd, "EDIT", "", ES_AUTOHSCROLL, WS_EX_CLIENTEDGE, ids::ID_GRP_EXPORT_PATH_EDIT);
+        g.grpChangeExportPathButton = makeTileArtControl(hwnd, "BUTTON", "Change...", BS_PUSHBUTTON, 0, ids::ID_GRP_CHANGE_EXPORT_PATH);
+        g.grpList = makeTileArtControl(hwnd, "LISTBOX", "", WS_VSCROLL | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT | LBS_EXTENDEDSEL, WS_EX_CLIENTEDGE, ids::ID_GRP_LIST);
+        g.grpExtractButton = makeTileArtControl(hwnd, "BUTTON", "Extract selected...", BS_PUSHBUTTON, 0, ids::ID_GRP_EXTRACT_SELECTED);
+        g.grpExtractAllButton = makeTileArtControl(hwnd, "BUTTON", "Extract all...", BS_PUSHBUTTON, 0, ids::ID_GRP_EXTRACT_ALL);
+        g.grpImportButton = makeTileArtControl(hwnd, "BUTTON", "Import files...", BS_PUSHBUTTON, 0, ids::ID_GRP_IMPORT_FILES);
+        layoutGrpEditControls(hwnd);
+        updateGrpEditPanel();
+        return 0;
+    case WM_SIZE:
+        layoutGrpEditControls(hwnd);
+        InvalidateRect(hwnd, nullptr, TRUE);
+        return 0;
+    case WM_COMMAND:
+        switch (LOWORD(wp))
+        {
+        case ids::ID_GRP_SELECT_GRP:
+            promptSelectGrpForEditor();
+            return 0;
+        case ids::ID_GRP_CHANGE_EXPORT_PATH:
+            promptGrpExportPath("GRP export path");
+            return 0;
+        case ids::ID_GRP_EXTRACT_SELECTED:
+            extractGrpEntriesToFolderByIndices(selectedGrpEntryIndices());
+            return 0;
+        case ids::ID_GRP_EXTRACT_ALL:
+            extractAllGrpEntries();
+            return 0;
+        case ids::ID_GRP_IMPORT_FILES:
+            promptImportFilesIntoGrp();
+            return 0;
+        case ids::ID_GRP_REFRESH:
+            updateGrpEditPanel();
+            return 0;
+        case ids::ID_GRP_LIST:
+            if (HIWORD(wp) == LBN_DBLCLK)
+            {
+                const int sel = g.grpList ? static_cast<int>(SendMessageA(g.grpList, LB_GETCURSEL, 0, 0)) : LB_ERR;
+                extractGrpEntryToFolderByIndex(sel == LB_ERR ? -1 : sel);
+                return 0;
+            }
+            break;
+        }
+        break;
+    case WM_PAINT:
+    {
+        PAINTSTRUCT ps{};
+        HDC hdc = BeginPaint(hwnd, &ps);
+        drawGrpEditPanel(hwnd, hdc);
+        EndPaint(hwnd, &ps);
+        return 0;
+    }
+    case WM_CTLCOLORSTATIC:
+    case WM_CTLCOLOREDIT:
+    case WM_CTLCOLORLISTBOX:
+    case WM_CTLCOLORBTN:
+        return darkCtlColor(msg, wp);
+    case WM_DRAWITEM:
+        drawDarkButton(reinterpret_cast<DRAWITEMSTRUCT*>(lp));
+        return TRUE;
+    case WM_ERASEBKGND:
+        return 1;
+    }
+    return DefWindowProcA(hwnd, msg, wp, lp);
+}
+
+static bool saveArtRangeToFolder(int artIndex, const std::string& folder)
+{
+    const int start = artIndex * 256;
+    const int end = min(MAXTILES - 1, start + 255);
+    if (start < 0 || start >= MAXTILES || start > end) return false;
+
+    char name[32];
+    std::snprintf(name, sizeof(name), "TILES%03d.ART", artIndex);
+    const std::string path = pathJoin(folder, name);
+
+    FILE* f = nullptr;
+    if (fopen_s(&f, path.c_str(), "wb") != 0 || !f) return false;
+
+    bool ok = true;
+    ok = ok && writeLe32(f, 1);            // artversion
+    ok = ok && writeLe32(f, MAXTILES);     // numtiles is historically unused, but Build writes a total count.
+    ok = ok && writeLe32(f, start);
+    ok = ok && writeLe32(f, end);
+
+    for (int t = start; ok && t <= end; ++t) ok = writeLe16(f, tilesizx[t]);
+    for (int t = start; ok && t <= end; ++t) ok = writeLe16(f, tilesizy[t]);
+    for (int t = start; ok && t <= end; ++t) ok = writeLe32(f, picanm[t]);
+
+    for (int t = start; ok && t <= end; ++t)
+    {
+        const int w = tilesizx[t];
+        const int h = tilesizy[t];
+        if (w <= 0 || h <= 0) continue;
+        if (!waloff[t]) loadtile(static_cast<short>(t));
+        const unsigned char* src = reinterpret_cast<const unsigned char*>(static_cast<std::intptr_t>(waloff[t]));
+        if (!src) { ok = false; break; }
+        const size_t bytes = static_cast<size_t>(w) * static_cast<size_t>(h);
+        ok = std::fwrite(src, 1, bytes, f) == bytes;
+    }
+
+    std::fclose(f);
+    if (!ok) DeleteFileA(path.c_str());
+    return ok;
+}
+
+static bool saveModifiedArtFiles()
+{
+    if (!g.artDirty)
+    {
+        setStatus("No unsaved ART tile changes.");
+        return true;
+    }
+
+    const std::string folder = artSaveFolder();
+    if (folder.empty()) return false;
+
+    std::set<int> artRanges;
+    for (std::unordered_map<int, TileOverride>::const_iterator it = g.tileOverrides.begin(); it != g.tileOverrides.end(); ++it)
+    {
+        if (it->second.dirty) artRanges.insert(it->first / 256);
+    }
+
+    if (artRanges.empty())
+    {
+        setArtDirty(false);
+        setStatus("No unsaved ART tile changes.");
+        return true;
+    }
+
+    for (std::set<int>::const_iterator it = artRanges.begin(); it != artRanges.end(); ++it)
+    {
+        if (!saveArtRangeToFolder(*it, folder))
+        {
+            char msg[256];
+            std::snprintf(msg, sizeof(msg), "Could not save TILES%03d.ART to the GRP folder.", *it);
+            MessageBoxA(g.main, msg, "Save ART", MB_ICONERROR);
+            return false;
+        }
+    }
+
+    for (std::unordered_map<int, TileOverride>::iterator it = g.tileOverrides.begin(); it != g.tileOverrides.end(); ++it)
+        it->second.dirty = false;
+
+    setArtDirty(false);
+    updateTileArtPanel();
+    setStatus("Saved %d ART file(s) to %s.", static_cast<int>(artRanges.size()), folder.c_str());
+    return true;
+}
+
+static void layoutTileArtControls(HWND hwnd)
+{
+    RECT rc{};
+    GetClientRect(hwnd, &rc);
+    const int W = max(1, rc.right - rc.left);
+    const int m = 14;
+    const int top = 12;
+    const int labelW = 56;
+    const int editW = 90;
+    int x = m;
+
+    HWND tileLabel = GetDlgItem(hwnd, 1310);
+    moveCtl(tileLabel, x, top + 4, labelW, 20);
+    x += labelW;
+    moveCtl(g.artTileEdit, x, top, editW, 24);
+    x += editW + 8;
+    moveCtl(g.artUseSelectedButton, x, top, 126, 25);
+    x += 134;
+    moveCtl(g.artImportButton, x, top, 104, 25);
+    x += 112;
+    moveCtl(g.artExportButton, x, top, 104, 25);
+    x += 112;
+    moveCtl(g.artSaveButton, x, top, 112, 25);
+    x += 120;
+    moveCtl(g.artPaletteButton, x, top, max(120, W - x - m), 25);
+    moveCtl(g.artStatusLabel, m, top + 36, W - 2 * m, 22);
+}
+
+static void drawTileArtPanel(HWND hwnd, HDC hdc)
+{
+    RECT rc{};
+    GetClientRect(hwnd, &rc);
+    fillRectColor(hdc, rc, theme::WindowBg);
+
+    SetBkMode(hdc, TRANSPARENT);
+    SetTextColor(hdc, theme::Text);
+
+    const int panelTop = 76;
+    RECT card{ 14, panelTop, max(15, rc.right - 14), max(panelTop + 240, rc.bottom - 14) };
+    fillRectColor(hdc, card, theme::CardBg);
+    drawRectFrame(hdc, card, theme::Border);
+
+    const int previewSize = min(256, max(96, min(card.right - card.left - 36, card.bottom - card.top - 78)));
+    const int px = card.left + 18;
+    const int py = card.top + 46;
+
+    HFONT oldFont = reinterpret_cast<HFONT>(SelectObject(hdc, GetStockObject(DEFAULT_GUI_FONT)));
+    const char* title = "Tile Art Import / Export";
+    TextOutA(hdc, card.left + 18, card.top + 16, title, static_cast<int>(std::strlen(title)));
+
+    drawTilePreview(hdc, g.selectedTile, px, py, previewSize, previewSize);
+    { RECT previewFrame{ px, py, px + previewSize, py + previewSize }; drawRectFrame(hdc, previewFrame, theme::Border); }
+
+    char info[512];
+    std::snprintf(info, sizeof(info),
+        "Import PNG maps image colors to the Duke3D PALETTE.DAT palette and keeps transparent pixels as index 255.\r\n"
+        "Save writes complete TILES###.ART replacement files beside DUKE3D.GRP, so the game can load them before the GRP.");
+    RECT textRc{ px + previewSize + 24, py, card.right - 18, py + previewSize };
+    DrawTextA(hdc, info, -1, &textRc, DT_LEFT | DT_WORDBREAK);
+    SelectObject(hdc, oldFont);
+}
+
+static LRESULT CALLBACK TileArtProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
+{
+    switch (msg)
+    {
+    case WM_CREATE:
+        makeTileArtControl(hwnd, "STATIC", "Tile #", SS_LEFT, 0, 1310);
+        g.artTileEdit = makeTileArtControl(hwnd, "EDIT", "0", ES_AUTOHSCROLL, WS_EX_CLIENTEDGE, ids::ID_ART_TILE_EDIT);
+        g.artUseSelectedButton = makeTileArtControl(hwnd, "BUTTON", "Use selected tile", BS_PUSHBUTTON, 0, ids::ID_ART_USE_SELECTED);
+        g.artImportButton = makeTileArtControl(hwnd, "BUTTON", "Import PNG...", BS_PUSHBUTTON, 0, ids::ID_ART_IMPORT_PNG);
+        g.artExportButton = makeTileArtControl(hwnd, "BUTTON", "Export PNG...", BS_PUSHBUTTON, 0, ids::ID_ART_EXPORT_PNG);
+        g.artSaveButton = makeTileArtControl(hwnd, "BUTTON", "Save ART files", BS_PUSHBUTTON, 0, ids::ID_ART_SAVE_ART);
+        g.artPaletteButton = makeTileArtControl(hwnd, "BUTTON", "Reload palette from GRP", BS_PUSHBUTTON, 0, ids::ID_ART_RELOAD_GRP_PALETTE);
+        g.artStatusLabel = makeTileArtControl(hwnd, "STATIC", "Tile art ready", SS_LEFT, 0, 1311);
+        layoutTileArtControls(hwnd);
+        updateTileArtPanel();
+        return 0;
+    case WM_SIZE:
+        layoutTileArtControls(hwnd);
+        InvalidateRect(hwnd, nullptr, TRUE);
+        return 0;
+    case WM_COMMAND:
+        switch (LOWORD(wp))
+        {
+        case ids::ID_ART_USE_SELECTED:
+            updateTileArtPanel();
+            return 0;
+        case ids::ID_ART_IMPORT_PNG:
+            importSelectedTileFromPng();
+            return 0;
+        case ids::ID_ART_EXPORT_PNG:
+            exportSelectedTileToPng();
+            return 0;
+        case ids::ID_ART_SAVE_ART:
+            saveModifiedArtFiles();
+            return 0;
+        case ids::ID_ART_RELOAD_GRP_PALETTE:
+            if (ensureDukeGrpPath() && loadPaletteFromGrp(g.dukeGrpPath.c_str()))
+            {
+                setStatus("Reloaded Duke3D palette from %s.", pathBaseNameString(g.dukeGrpPath).c_str());
+                refreshAllViews();
+            }
+            return 0;
+        }
+        break;
+    case WM_PAINT:
+    {
+        PAINTSTRUCT ps{};
+        HDC hdc = BeginPaint(hwnd, &ps);
+        drawTileArtPanel(hwnd, hdc);
+        EndPaint(hwnd, &ps);
+        return 0;
+    }
+    case WM_CTLCOLORSTATIC:
+    case WM_CTLCOLOREDIT:
+    case WM_CTLCOLORBTN:
+        return darkCtlColor(msg, wp);
+    case WM_DRAWITEM:
+        drawDarkButton(reinterpret_cast<DRAWITEMSTRUCT*>(lp));
+        return TRUE;
+    case WM_ERASEBKGND:
+        return 1;
+    }
+    return DefWindowProcA(hwnd, msg, wp, lp);
+}
+
+
+// -----------------------------------------------------------------------------
+// Right-side selection inspector.
+// -----------------------------------------------------------------------------
+static HFONT makeInspectorFont(int points, int weight)
+{
+    HDC hdc = GetDC(nullptr);
+    const int dpiY = hdc ? GetDeviceCaps(hdc, LOGPIXELSY) : 96;
+    if (hdc) ReleaseDC(nullptr, hdc);
+
+    return CreateFontA(-MulDiv(points, dpiY, 72), 0, 0, 0, weight, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+        DEFAULT_PITCH | FF_DONTCARE, "Segoe UI");
+}
+
+static void ensureInspectorFonts()
+{
+    if (!g.inspFont) g.inspFont = makeInspectorFont(9, FW_NORMAL);
+    if (!g.inspBoldFont) g.inspBoldFont = makeInspectorFont(9, FW_SEMIBOLD);
+}
+
+static void setControlFont(HWND h, bool bold = false)
+{
+    if (!h) return;
+    ensureInspectorFonts();
+    SendMessageA(h, WM_SETFONT, reinterpret_cast<WPARAM>(bold ? g.inspBoldFont : g.inspFont), TRUE);
+}
+
+static HWND makeInspectorControl(HWND parent, const char* cls, const char* text, DWORD style, DWORD exStyle, int id, bool bold = false)
+{
+    if (cls && std::strcmp(cls, "BUTTON") == 0) style |= BS_OWNERDRAW;
+    // Static labels get transparent painting so the custom inspector cards show
+    // through, closer to a modern C#/WinForms inspector instead of old group boxes.
+    if (cls && std::strcmp(cls, "STATIC") == 0) exStyle |= WS_EX_TRANSPARENT;
+
+    HWND h = CreateWindowExA(exStyle, cls, text ? text : "", WS_CHILD | WS_VISIBLE | style,
+        0, 0, 10, 10, parent, reinterpret_cast<HMENU>(id), g.inst, nullptr);
+    setControlFont(h, bold);
     return h;
 }
 
@@ -3356,28 +5680,33 @@ static void updateInspector()
     g.inspectorUpdating = true;
     const bool surfaceOk = selectedSurfaceValid();
     const bool sectorOk = selectedSectorValid();
+    const bool spriteOk = selectedSpriteValid();
 
     char title[160];
     if (surfaceOk)
     {
         if (g.sel.stat == SS_SPRITE)
-            std::snprintf(title, sizeof(title), "Selection: %s %d", selectedSurfaceName(), g.sel.wall);
+            std::snprintf(title, sizeof(title), "Sprite %d  |  Sector %d", g.sel.wall, sprite[g.sel.wall].sectnum);
         else if (g.sel.stat == SS_WALL || g.sel.stat == SS_MASKED_WALL)
-            std::snprintf(title, sizeof(title), "Selection: %s %d", selectedSurfaceName(), g.sel.wall);
+            std::snprintf(title, sizeof(title), "%s %d  |  Sector %d", selectedSurfaceName(), g.sel.wall, g.sel.sector);
         else
-            std::snprintf(title, sizeof(title), "Selection: %s in sector %d", selectedSurfaceName(), g.sel.sector);
+            std::snprintf(title, sizeof(title), "%s  |  Sector %d", selectedSurfaceName(), g.sel.sector);
     }
     else if (sectorOk)
     {
-        std::snprintf(title, sizeof(title), "Selection: sector %d", g.sel.sector);
+        std::snprintf(title, sizeof(title), "Sector %d", g.sel.sector);
     }
     else
     {
-        std::snprintf(title, sizeof(title), "Selection: none");
+        std::snprintf(title, sizeof(title), "Nothing selected");
     }
     SetWindowTextA(g.inspTitle, title);
 
-    SetWindowTextA(g.inspSurfaceTitle, surfaceOk ? "Surface" : "Surface (nothing selected)");
+    if (g.inspSurfaceGroup) SetWindowTextA(g.inspSurfaceGroup, "Surface / Material");
+    if (g.inspPositionGroup) SetWindowTextA(g.inspPositionGroup, "Sprite Position");
+    if (g.inspSectorGroup) SetWindowTextA(g.inspSectorGroup, "Sector Data");
+
+    SetWindowTextA(g.inspSurfaceTitle, surfaceOk ? selectedSurfaceName() : "Select a wall, floor, ceiling, or sprite");
     enableCtl(g.inspTileEdit, surfaceOk);
     enableCtl(g.inspShadeEdit, surfaceOk);
     enableCtl(g.inspPalEdit, surfaceOk);
@@ -3396,15 +5725,32 @@ static void updateInspector()
         setEditBlank(g.inspPalEdit);
     }
 
+    enableCtl(g.inspXEdit, spriteOk);
+    enableCtl(g.inspYEdit, spriteOk);
+    enableCtl(g.inspZEdit, spriteOk);
+    if (spriteOk)
+    {
+        const spritetype& sp = sprite[g.sel.wall];
+        setEditLong(g.inspXEdit, sp.x);
+        setEditLong(g.inspYEdit, sp.y);
+        setEditLong(g.inspZEdit, sp.z);
+    }
+    else
+    {
+        setEditBlank(g.inspXEdit);
+        setEditBlank(g.inspYEdit);
+        setEditBlank(g.inspZEdit);
+    }
+
     char sectorTitle[128];
     if (sectorOk) std::snprintf(sectorTitle, sizeof(sectorTitle), "Sector %d", g.sel.sector);
-    else std::snprintf(sectorTitle, sizeof(sectorTitle), "Sector (nothing selected)");
+    else std::snprintf(sectorTitle, sizeof(sectorTitle), "No sector selected");
     SetWindowTextA(g.inspSectorTitle, sectorTitle);
 
     enableCtl(g.inspVisEdit, sectorOk);
     enableCtl(g.inspLotagEdit, sectorOk);
     enableCtl(g.inspHitagEdit, sectorOk);
-    enableCtl(g.inspApplyButton, surfaceOk || sectorOk);
+    enableCtl(g.inspApplyButton, surfaceOk || sectorOk || spriteOk);
     enableCtl(g.inspRefreshButton, true);
 
     if (sectorOk)
@@ -3429,9 +5775,10 @@ static void applyInspectorEdits(bool useCurrentTile)
 
     const bool surfaceOk = selectedSurfaceValid();
     const bool sectorOk = selectedSectorValid();
-    if (!surfaceOk && !sectorOk)
+    const bool spriteOk = selectedSpriteValid();
+    if (!surfaceOk && !sectorOk && !spriteOk)
     {
-        setStatus("No selected wall/floor/ceiling/sector to edit.");
+        setStatus("No selected wall/floor/ceiling/sprite/sector to edit.");
         return;
     }
 
@@ -3453,6 +5800,9 @@ static void applyInspectorEdits(bool useCurrentTile)
         changed = setSelectedPalDirect(static_cast<int>(palValue)) || changed;
     }
 
+    // Sector fields are applied before sprite movement so moving a sprite into a
+    // different sector does not accidentally copy the old sector tags/visibility
+    // onto the new sector in the same Apply click.
     if (sectorOk)
     {
         sectortype& s = sector[g.sel.sector];
@@ -3468,6 +5818,25 @@ static void applyInspectorEdits(bool useCurrentTile)
         if (s.visibility != vis) { s.visibility = vis; changed = true; }
         if (s.lotag != lotag) { s.lotag = lotag; changed = true; }
         if (s.hitag != hitag) { s.hitag = hitag; changed = true; }
+    }
+
+    if (spriteOk)
+    {
+        long xValue = 0, yValue = 0, zValue = 0;
+        if (!readEditLong(g.inspXEdit, "Sprite X", xValue)) return;
+        if (!readEditLong(g.inspYEdit, "Sprite Y", yValue)) return;
+        if (!readEditLong(g.inspZEdit, "Sprite Z", zValue)) return;
+
+        spritetype& sp = sprite[g.sel.wall];
+        if (sp.x != xValue || sp.y != yValue || sp.z != zValue)
+        {
+            setsprite(g.sel.wall, xValue, yValue, zValue);
+            g.sel.sector = sprite[g.sel.wall].sectnum;
+            searchsector = g.sel.sector;
+            searchwall = g.sel.wall;
+            searchstat = static_cast<short>(g.sel.stat);
+            changed = true;
+        }
     }
 
     if (changed)
@@ -3489,14 +5858,18 @@ static void layoutInspectorControls(HWND hwnd)
     GetClientRect(hwnd, &rc);
     const int W = max(1, rc.right - rc.left);
     const int m = 10;
-    const int labelW = 72;
-    const int editX = m + labelW;
-    const int editW = max(52, W - editX - m);
-    const int rowH = 22;
+    const int cardX = m;
+    const int cardW = max(1, W - 2 * m);
+    const int cardPadX = 12;
+    const int headerH = 26;
+    const int contentX = cardX + cardPadX;
+    const int contentW = max(1, cardW - 2 * cardPadX);
+    const int labelW = clamp_int(contentW / 3, 58, 86);
+    const int editGap = 8;
+    const int editX = contentX + labelW + editGap;
+    const int editW = max(56, cardX + cardW - cardPadX - editX);
+    const int rowH = 23;
     int y = 10;
-
-    moveCtl(g.inspTitle, m, y, W - 2 * m, 22); y += 30;
-    moveCtl(g.inspSurfaceTitle, m, y, W - 2 * m, 20); y += 26;
 
     HWND labelTexture = GetDlgItem(hwnd, 1201);
     HWND labelShade = GetDlgItem(hwnd, 1202);
@@ -3504,26 +5877,87 @@ static void layoutInspectorControls(HWND hwnd)
     HWND labelVis = GetDlgItem(hwnd, 1204);
     HWND labelLotag = GetDlgItem(hwnd, 1205);
     HWND labelHitag = GetDlgItem(hwnd, 1206);
+    HWND labelX = GetDlgItem(hwnd, 1209);
+    HWND labelY = GetDlgItem(hwnd, 1210);
+    HWND labelZ = GetDlgItem(hwnd, 1211);
 
-    moveCtl(labelTexture, m, y + 4, labelW, 18);
-    moveCtl(g.inspTileEdit, editX, y, editW, rowH); y += 28;
-    moveCtl(g.inspUseTileButton, m, y, W - 2 * m, 24); y += 34;
-    moveCtl(labelShade, m, y + 4, labelW, 18);
-    moveCtl(g.inspShadeEdit, editX, y, editW, rowH); y += 28;
-    moveCtl(labelPal, m, y + 4, labelW, 18);
-    moveCtl(g.inspPalEdit, editX, y, editW, rowH); y += 36;
+    const int selectionH = 70;
+    moveCtl(g.inspSelectionGroup, contentX, y + 6, contentW, 18);
+    moveCtl(g.inspTitle, contentX, y + headerH + 13, contentW, 22);
+    y += selectionH + 10;
 
-    moveCtl(g.inspSectorTitle, m, y, W - 2 * m, 20); y += 26;
-    moveCtl(labelVis, m, y + 4, labelW, 18);
-    moveCtl(g.inspVisEdit, editX, y, editW, rowH); y += 28;
-    moveCtl(labelLotag, m, y + 4, labelW, 18);
-    moveCtl(g.inspLotagEdit, editX, y, editW, rowH); y += 28;
-    moveCtl(labelHitag, m, y + 4, labelW, 18);
-    moveCtl(g.inspHitagEdit, editX, y, editW, rowH); y += 36;
+    const int surfaceH = 190;
+    moveCtl(g.inspSurfaceGroup, contentX, y + 6, contentW, 18);
+    moveCtl(g.inspSurfaceTitle, contentX, y + headerH + 9, contentW, 18);
+    int rowY = y + headerH + 36;
+    moveCtl(labelTexture, contentX, rowY + 4, labelW, 18);
+    moveCtl(g.inspTileEdit, editX, rowY, editW, rowH); rowY += 31;
+    moveCtl(g.inspUseTileButton, contentX, rowY, contentW, 25); rowY += 35;
+    moveCtl(labelShade, contentX, rowY + 4, labelW, 18);
+    moveCtl(g.inspShadeEdit, editX, rowY, editW, rowH); rowY += 31;
+    moveCtl(labelPal, contentX, rowY + 4, labelW, 18);
+    moveCtl(g.inspPalEdit, editX, rowY, editW, rowH);
+    y += surfaceH + 10;
 
-    const int buttonW = max(70, (W - 3 * m) / 2);
-    moveCtl(g.inspApplyButton, m, y, buttonW, 26);
-    moveCtl(g.inspRefreshButton, m + buttonW + m, y, W - (m + buttonW + 2 * m), 26);
+    const int positionH = 140;
+    moveCtl(g.inspPositionGroup, contentX, y + 6, contentW, 18);
+    rowY = y + headerH + 18;
+    moveCtl(labelX, contentX, rowY + 4, labelW, 18);
+    moveCtl(g.inspXEdit, editX, rowY, editW, rowH); rowY += 31;
+    moveCtl(labelY, contentX, rowY + 4, labelW, 18);
+    moveCtl(g.inspYEdit, editX, rowY, editW, rowH); rowY += 31;
+    moveCtl(labelZ, contentX, rowY + 4, labelW, 18);
+    moveCtl(g.inspZEdit, editX, rowY, editW, rowH);
+    y += positionH + 10;
+
+    const int sectorH = 166;
+    moveCtl(g.inspSectorGroup, contentX, y + 6, contentW, 18);
+    moveCtl(g.inspSectorTitle, contentX, y + headerH + 9, contentW, 18);
+    rowY = y + headerH + 36;
+    moveCtl(labelVis, contentX, rowY + 4, labelW, 18);
+    moveCtl(g.inspVisEdit, editX, rowY, editW, rowH); rowY += 31;
+    moveCtl(labelLotag, contentX, rowY + 4, labelW, 18);
+    moveCtl(g.inspLotagEdit, editX, rowY, editW, rowH); rowY += 31;
+    moveCtl(labelHitag, contentX, rowY + 4, labelW, 18);
+    moveCtl(g.inspHitagEdit, editX, rowY, editW, rowH);
+    y += sectorH + 14;
+
+    const int buttonW = max(92, (W - 3 * m) / 2);
+    moveCtl(g.inspApplyButton, m, y, buttonW, 30);
+    moveCtl(g.inspRefreshButton, m + buttonW + m, y, W - (m + buttonW + 2 * m), 30);
+
+    InvalidateRect(hwnd, nullptr, TRUE);
+}
+
+static void drawInspectorCard(HDC hdc, const RECT& r)
+{
+    fillRectColor(hdc, r, theme::CardBg);
+
+    RECT header = r;
+    header.bottom = header.top + 26;
+    fillRectColor(hdc, header, theme::HeaderBg);
+    drawRectFrame(hdc, r, theme::Border);
+}
+
+static void drawInspectorChrome(HWND hwnd, HDC hdc)
+{
+    RECT rc{};
+    GetClientRect(hwnd, &rc);
+    fillRectColor(hdc, rc, theme::WindowBg);
+
+    const int W = max(1, rc.right - rc.left);
+    const int m = 10;
+    const int cardX = m;
+    const int cardW = max(1, W - 2 * m);
+    int y = 10;
+
+    const int heights[] = { 70, 190, 140, 166 };
+    for (int i = 0; i < 4; ++i)
+    {
+        RECT card{ cardX, y, cardX + cardW, y + heights[i] };
+        drawInspectorCard(hdc, card);
+        y += heights[i] + 10;
+    }
 }
 
 static LRESULT CALLBACK InspectorProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
@@ -3532,8 +5966,13 @@ static LRESULT CALLBACK InspectorProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     {
     case WM_CREATE:
     {
-        g.inspTitle = makeInspectorControl(hwnd, "STATIC", "Selection: none", SS_LEFT, 0, 1200);
-        g.inspSurfaceTitle = makeInspectorControl(hwnd, "STATIC", "Surface", SS_LEFT, 0, 1207);
+        g.inspSelectionGroup = makeInspectorControl(hwnd, "STATIC", "Selection", SS_LEFT, 0, 1190, true);
+        g.inspSurfaceGroup = makeInspectorControl(hwnd, "STATIC", "Surface / Material", SS_LEFT, 0, 1191, true);
+        g.inspPositionGroup = makeInspectorControl(hwnd, "STATIC", "Sprite Position", SS_LEFT, 0, 1192, true);
+        g.inspSectorGroup = makeInspectorControl(hwnd, "STATIC", "Sector Data", SS_LEFT, 0, 1193, true);
+
+        g.inspTitle = makeInspectorControl(hwnd, "STATIC", "Nothing selected", SS_LEFT, 0, 1200, true);
+        g.inspSurfaceTitle = makeInspectorControl(hwnd, "STATIC", "Select a surface", SS_LEFT, 0, 1207);
         makeInspectorControl(hwnd, "STATIC", "Texture", SS_LEFT, 0, 1201);
         g.inspTileEdit = makeInspectorControl(hwnd, "EDIT", "", ES_AUTOHSCROLL, WS_EX_CLIENTEDGE, ids::ID_INSP_TILE_EDIT);
         g.inspUseTileButton = makeInspectorControl(hwnd, "BUTTON", "Use selected texture tile", BS_PUSHBUTTON, 0, ids::ID_INSP_USE_TILE);
@@ -3541,15 +5980,24 @@ static LRESULT CALLBACK InspectorProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         g.inspShadeEdit = makeInspectorControl(hwnd, "EDIT", "", ES_AUTOHSCROLL, WS_EX_CLIENTEDGE, ids::ID_INSP_SHADE_EDIT);
         makeInspectorControl(hwnd, "STATIC", "Palette", SS_LEFT, 0, 1203);
         g.inspPalEdit = makeInspectorControl(hwnd, "EDIT", "", ES_AUTOHSCROLL, WS_EX_CLIENTEDGE, ids::ID_INSP_PAL_EDIT);
-        g.inspSectorTitle = makeInspectorControl(hwnd, "STATIC", "Sector", SS_LEFT, 0, 1208);
+
+        makeInspectorControl(hwnd, "STATIC", "X", SS_LEFT, 0, 1209);
+        g.inspXEdit = makeInspectorControl(hwnd, "EDIT", "", ES_AUTOHSCROLL, WS_EX_CLIENTEDGE, ids::ID_INSP_X_EDIT);
+        makeInspectorControl(hwnd, "STATIC", "Y", SS_LEFT, 0, 1210);
+        g.inspYEdit = makeInspectorControl(hwnd, "EDIT", "", ES_AUTOHSCROLL, WS_EX_CLIENTEDGE, ids::ID_INSP_Y_EDIT);
+        makeInspectorControl(hwnd, "STATIC", "Z", SS_LEFT, 0, 1211);
+        g.inspZEdit = makeInspectorControl(hwnd, "EDIT", "", ES_AUTOHSCROLL, WS_EX_CLIENTEDGE, ids::ID_INSP_Z_EDIT);
+
+        g.inspSectorTitle = makeInspectorControl(hwnd, "STATIC", "No sector selected", SS_LEFT, 0, 1208);
         makeInspectorControl(hwnd, "STATIC", "Visibility", SS_LEFT, 0, 1204);
         g.inspVisEdit = makeInspectorControl(hwnd, "EDIT", "", ES_AUTOHSCROLL, WS_EX_CLIENTEDGE, ids::ID_INSP_VIS_EDIT);
         makeInspectorControl(hwnd, "STATIC", "Lotag", SS_LEFT, 0, 1205);
         g.inspLotagEdit = makeInspectorControl(hwnd, "EDIT", "", ES_AUTOHSCROLL, WS_EX_CLIENTEDGE, ids::ID_INSP_LOTAG_EDIT);
         makeInspectorControl(hwnd, "STATIC", "Hitag", SS_LEFT, 0, 1206);
         g.inspHitagEdit = makeInspectorControl(hwnd, "EDIT", "", ES_AUTOHSCROLL, WS_EX_CLIENTEDGE, ids::ID_INSP_HITAG_EDIT);
-        g.inspApplyButton = makeInspectorControl(hwnd, "BUTTON", "Apply", BS_DEFPUSHBUTTON, 0, ids::ID_INSP_APPLY);
-        g.inspRefreshButton = makeInspectorControl(hwnd, "BUTTON", "Refresh", BS_PUSHBUTTON, 0, ids::ID_INSP_REFRESH);
+
+        g.inspApplyButton = makeInspectorControl(hwnd, "BUTTON", "Apply changes", BS_DEFPUSHBUTTON, 0, ids::ID_INSP_APPLY);
+        g.inspRefreshButton = makeInspectorControl(hwnd, "BUTTON", "Revert", BS_PUSHBUTTON, 0, ids::ID_INSP_REFRESH);
         layoutInspectorControls(hwnd);
         updateInspector();
         return 0;
@@ -3571,14 +6019,47 @@ static LRESULT CALLBACK InspectorProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             return 0;
         }
         break;
-    case WM_ERASEBKGND:
+    case WM_PAINT:
+    {
+        PAINTSTRUCT ps{};
+        HDC hdc = BeginPaint(hwnd, &ps);
+        drawInspectorChrome(hwnd, hdc);
+        EndPaint(hwnd, &ps);
+        return 0;
+    }
+    case WM_CTLCOLORSTATIC:
     {
         HDC hdc = reinterpret_cast<HDC>(wp);
-        RECT rc{};
-        GetClientRect(hwnd, &rc);
-        FillRect(hdc, &rc, reinterpret_cast<HBRUSH>(COLOR_BTNFACE + 1));
-        return 1;
+        HWND child = reinterpret_cast<HWND>(lp);
+        const int id = GetDlgCtrlID(child);
+        SetBkMode(hdc, TRANSPARENT);
+        if (id >= 1190 && id <= 1193)
+        {
+            SetTextColor(hdc, theme::Text);
+            return reinterpret_cast<LRESULT>(themeHeaderBrush());
+        }
+        if (id == 1200)
+        {
+            SetTextColor(hdc, theme::Text);
+            return reinterpret_cast<LRESULT>(themeCardBrush());
+        }
+        if (id == 1207 || id == 1208)
+        {
+            SetTextColor(hdc, theme::MutedText);
+            return reinterpret_cast<LRESULT>(themeCardBrush());
+        }
+        SetTextColor(hdc, theme::MutedText);
+        return reinterpret_cast<LRESULT>(themeCardBrush());
     }
+    case WM_CTLCOLOREDIT:
+        return darkCtlColor(msg, wp);
+    case WM_CTLCOLORBTN:
+        return darkCtlColor(msg, wp);
+    case WM_DRAWITEM:
+        drawDarkButton(reinterpret_cast<DRAWITEMSTRUCT*>(lp));
+        return TRUE;
+    case WM_ERASEBKGND:
+        return 1;
     }
     return DefWindowProcA(hwnd, msg, wp, lp);
 }
@@ -3588,12 +6069,21 @@ static LRESULT CALLBACK InspectorProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 // -----------------------------------------------------------------------------
 static void switchTab(int tab)
 {
-    g.activeTab = tab ? 1 : 0;
+    g.activeTab = clamp_int(tab, 0, 3);
     TabCtrl_SetCurSel(g.tab, g.activeTab);
+    if (g.tab) RedrawWindow(g.tab, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_FRAME);
     ShowWindow(g.view2d, g.activeTab == 0 ? SW_SHOW : SW_HIDE);
     ShowWindow(g.host3d, g.activeTab == 1 ? SW_SHOW : SW_HIDE);
+    ShowWindow(g.tileArt, g.activeTab == 2 ? SW_SHOW : SW_HIDE);
+    ShowWindow(g.grpEdit, g.activeTab == 3 ? SW_SHOW : SW_HIDE);
     if (g.engine) ShowWindow(g.engine, g.activeTab == 1 ? SW_SHOW : SW_HIDE);
-    if (g.activeTab == 1) attachEngineWindow();
+    if (g.activeTab == 1)
+    {
+        attachEngineWindow();
+        SetFocus(g.engine ? g.engine : g.host3d);
+    }
+    if (g.activeTab == 2) updateTileArtPanel();
+    if (g.activeTab == 3) updateGrpEditPanel();
     refreshAllViews();
 }
 
@@ -3605,7 +6095,7 @@ static void layoutChildren(HWND hwnd)
     const int inspectorW = max(180, clientW / 5); // Right inspector: roughly 20% of the main window.
     const int editorW = max(1, clientW - inspectorW);
 
-    const int texH = TEXTURE_BAR_HEIGHT;
+    const int texH = min(currentTextureBarHeight(), max(TEXTURE_BAR_MIN_HEIGHT, clientH - 120));
     const int tabH = max(0, clientH - texH);
     MoveWindow(g.tab, 0, 0, editorW, tabH, TRUE);
     MoveWindow(g.textureBar, 0, tabH, editorW, texH, TRUE);
@@ -3621,8 +6111,12 @@ static void layoutChildren(HWND hwnd)
     const int h = max(1, tr.bottom - tr.top);
     MoveWindow(g.view2d, tr.left, tr.top, w, h, TRUE);
     MoveWindow(g.host3d, tr.left, tr.top, w, h, TRUE);
+    MoveWindow(g.tileArt, tr.left, tr.top, w, h, TRUE);
+    MoveWindow(g.grpEdit, tr.left, tr.top, w, h, TRUE);
     if (g.engine)
         SetWindowPos(g.engine, nullptr, 0, 0, w, h, SWP_NOZORDER | SWP_SHOWWINDOW);
+    if (g.tab)
+        RedrawWindow(g.tab, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_FRAME);
 }
 
 static void gotoTileDialog()
@@ -3641,17 +6135,23 @@ static void showKeyboardHelp()
 {
     const char* msg =
         "2D view:\n"
-        "  Right drag: pan, mouse wheel: zoom\n"
+        "  Right-click: context menu; right drag: pan; mouse wheel: zoom\n"
         "  Left drag vertex/sprite: move it\n"
         "  Space/click: begin/add sector points, Enter: close sector, Esc: cancel\n"
-        "  Insert: insert point on nearest wall, S: insert sprite, Delete: delete\n"
+        "  Insert or right-click > Add point here: insert point on nearest wall; S: insert sprite; Delete: delete\n"
         "  G: grid size, L: grid lock, Ctrl+T: show tags\n"
+        "  Shift-click a sprite/vertex overlap to grab the vertex instead of the sprite\n"
         "\n3D view:\n"
-        "  W/A/S/D: move, arrows: look/turn, PgUp/PgDn: fly\n"
+        "  W/A/S/D: move, arrows: look/turn, Space/C or PgUp/PgDn: fly up/down\n"
         "  Right drag: turn/look, left click: select wall/floor/sprite\n"
+        "  Camera movement only runs while the 3D editor has focus\n"
+        "  F2/F3/F4/F6: 2D, 3D, Tile Art, GRP Edit tabs; F5: run map in Duke3DX\n"
         "\nEditing:\n"
-        "  Texture bar click: select tile, V/Ctrl-click: apply tile\n"
-        "  Tab: copy properties, Enter: paste properties\n"
+        "  Texture bar click: select tile, header button: expand/shrink browser\n"
+        "  Tile Art tab: import/export PNG tiles and save TILES###.ART beside DUKE3D.GRP\n"
+        "  GRP Edit tab: multi-select entries, extract selected/all, or import files into a GRP\n"
+        "  Sprite selection: click a sprite, then edit X/Y/Z in the inspector\n"
+        "  V/Ctrl-click: apply tile, Tab: copy properties, Enter: paste properties\n"
         "  B/1/M/T/P: blocking, one-way, masked, translucent, parallax\n"
         "  +/-: shade, PgUp/PgDn: adjust selected Z where applicable";
     MessageBoxA(g.main, msg, "Keyboard help", MB_ICONINFORMATION);
@@ -3661,7 +6161,14 @@ static bool mountGroupIfExists(const char* name)
 {
     DWORD attr = GetFileAttributesA(name);
     if (attr == INVALID_FILE_ATTRIBUTES || (attr & FILE_ATTRIBUTE_DIRECTORY)) return false;
-    return initgroupfile(const_cast<char*>(name)) >= 0;
+    const bool ok = initgroupfile(const_cast<char*>(name)) >= 0;
+    if (ok && g.dukeGrpPath.empty())
+    {
+        g.dukeGrpPath = fullPathOf(name);
+        if (g.grpEditPath.empty()) g.grpEditPath = g.dukeGrpPath;
+        if (g.grpExportPath.empty()) g.grpExportPath = pathJoin(pathDirectory(g.grpEditPath), "grp_export");
+    }
+    return ok;
 }
 
 static void loadBuildAssets()
@@ -3670,9 +6177,161 @@ static void loadBuildAssets()
     mountGroupIfExists("DUKE3D.GRP");
     initengine();
     inittimerhandler();
+    if (!g.dukeGrpPath.empty()) loadPaletteFromGrp(g.dukeGrpPath.c_str());
     loadpics(const_cast<char*>("tiles000.art"));
     refreshTileList();
 }
+
+static bool writeMapSnapshotForRun(const std::string& path)
+{
+    if (path.empty()) return false;
+    short sect = g.startsect;
+    updatesector(g.startx, g.starty, &sect);
+
+    char filename[MAX_PATH] = {};
+    std::strncpy(filename, path.c_str(), sizeof(filename) - 1);
+    if (saveboard(filename, &g.startx, &g.starty, &g.startz, &g.startang, &sect) < 0)
+        return false;
+    g.startsect = sect;
+    return true;
+}
+
+static std::string moduleDirectory()
+{
+    char path[MAX_PATH] = {};
+    GetModuleFileNameA(nullptr, path, sizeof(path));
+    return pathDirectory(path);
+}
+
+static bool findDuke3DX(std::string& exePath)
+{
+    std::vector<std::string> dirs;
+    if (!g.dukeGrpPath.empty()) dirs.push_back(pathDirectory(g.dukeGrpPath));
+    if (!g.boardGrpPath.empty()) dirs.push_back(pathDirectory(g.boardGrpPath));
+    if (!g.boardPath.empty() && g.boardPath.find('(') == std::string::npos) dirs.push_back(pathDirectory(g.boardPath));
+    dirs.push_back(moduleDirectory());
+    dirs.push_back(".");
+
+    for (size_t i = 0; i < dirs.size(); ++i)
+    {
+        const std::string candidate = pathJoin(dirs[i], "Duke3DX.exe");
+        if (fileExistsA(candidate.c_str()))
+        {
+            exePath = fullPathOf(candidate.c_str());
+            return true;
+        }
+    }
+
+    char file[MAX_PATH] = "";
+    OPENFILENAMEA ofn{};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = g.main;
+    ofn.lpstrFilter = "Duke3DX executable (Duke3DX.exe)\0Duke3DX.exe\0Executables (*.exe)\0*.exe\0All files (*.*)\0*.*\0";
+    ofn.lpstrFile = file;
+    ofn.nMaxFile = sizeof(file);
+    ofn.Flags = OFN_FILEMUSTEXIST | OFN_HIDEREADONLY;
+    ofn.lpstrDefExt = "exe";
+    if (!GetOpenFileNameA(&ofn)) return false;
+    exePath = fullPathOf(file);
+    return true;
+}
+
+static bool saveBeforeRunIfNeeded()
+{
+    if (!g.dirty && !g.artDirty) return true;
+
+    const int r = MessageBoxA(g.main,
+        "The current map or tile art has unsaved changes.\r\n\r\nSave changes before running Duke3DX?",
+        "Run map", MB_ICONQUESTION | MB_YESNO);
+    if (r != IDYES)
+    {
+        setStatus("Run canceled because changes were not saved.");
+        return false;
+    }
+
+    bool ok = true;
+    if (g.dirty)
+    {
+        if (g.boardFromGrp || g.boardPath.empty() || g.boardPath == "newboard.map")
+            ok = promptSaveMap();
+        else
+            ok = saveMapFile(g.boardPath.c_str());
+    }
+
+    if (ok && g.artDirty)
+        ok = saveModifiedArtFiles();
+
+    if (!ok) setStatus("Run canceled because save failed or was canceled.");
+    return ok;
+}
+
+static bool buildRunMapPath(std::string& mapPath)
+{
+    mapPath.clear();
+
+    if (!g.boardFromGrp && !g.boardPath.empty() && g.boardPath != "newboard.map")
+    {
+        if (g.dirty)
+        {
+            MessageBoxA(g.main, "The map still has unsaved changes. Save it before running.", "Run map", MB_ICONWARNING);
+            return false;
+        }
+        mapPath = fullPathOf(g.boardPath.c_str());
+        return true;
+    }
+
+    std::string folder;
+    if (!g.boardGrpPath.empty()) folder = pathDirectory(g.boardGrpPath);
+    else if (!g.dukeGrpPath.empty()) folder = pathDirectory(g.dukeGrpPath);
+    else folder = moduleDirectory();
+
+    std::string name;
+    if (g.boardFromGrp && !g.boardGrpEntry.empty()) name = g.boardGrpEntry;
+    else if (!g.boardPath.empty() && g.boardPath != "newboard.map") name = pathBaseNameString(g.boardPath);
+    else name = "BuildXRun.map";
+
+    name = sanitizeFileName(forceMapExtension(name));
+    mapPath = pathJoin(folder, name);
+    if (!writeMapSnapshotForRun(mapPath))
+    {
+        MessageBoxA(g.main, "Could not write a temporary map file to run.", "Run map", MB_ICONERROR);
+        return false;
+    }
+    return true;
+}
+
+static void runCurrentMap()
+{
+    if (!saveBeforeRunIfNeeded()) return;
+
+    std::string mapPath;
+    if (!buildRunMapPath(mapPath)) return;
+
+    std::string exePath;
+    if (!findDuke3DX(exePath)) return;
+
+    const std::string workDir = pathDirectory(exePath);
+    std::string commandLine = "\"" + exePath + "\" /map \"" + mapPath + "\"";
+
+    STARTUPINFOA si{};
+    si.cb = sizeof(si);
+    PROCESS_INFORMATION pi{};
+    std::vector<char> mutableCmd(commandLine.begin(), commandLine.end());
+    mutableCmd.push_back('\0');
+
+    BOOL ok = CreateProcessA(exePath.c_str(), mutableCmd.data(), nullptr, nullptr, FALSE, 0, nullptr,
+        workDir.empty() ? nullptr : workDir.c_str(), &si, &pi);
+    if (!ok)
+    {
+        MessageBoxA(g.main, "Could not launch Duke3DX.exe.", "Run map", MB_ICONERROR);
+        return;
+    }
+
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    setStatus("Launched Duke3DX.exe /map %s", pathBaseNameString(mapPath).c_str());
+}
+
 
 static void handleCommand(HWND hwnd, int id)
 {
@@ -3696,11 +6355,24 @@ static void handleCommand(HWND hwnd, int id)
         if (confirmDiscardChanges()) promptOpenMapFromGrp();
         break;
     case ids::M_FILE_SAVE:
-        if (g.boardFromGrp || g.boardPath.empty() || g.boardPath == "newboard.map") promptSaveMap();
-        else saveMapFile(g.boardPath.c_str());
+    {
+        bool ok = true;
+        if (g.dirty)
+        {
+            if (g.boardFromGrp || g.boardPath.empty() || g.boardPath == "newboard.map") ok = promptSaveMap();
+            else ok = saveMapFile(g.boardPath.c_str());
+        }
+        if (ok && g.artDirty) saveModifiedArtFiles();
         break;
+    }
     case ids::M_FILE_SAVE_AS:
-        promptSaveMap();
+    {
+        const bool ok = promptSaveMap();
+        if (ok && g.artDirty) saveModifiedArtFiles();
+        break;
+    }
+    case ids::M_FILE_RUN_MAP:
+        runCurrentMap();
         break;
     case ids::M_FILE_EXIT:
         PostMessage(hwnd, WM_CLOSE, 0, 0);
@@ -3709,6 +6381,10 @@ static void handleCommand(HWND hwnd, int id)
         switchTab(0); break;
     case ids::M_VIEW_3D:
         switchTab(1); break;
+    case ids::M_VIEW_TILE_ART:
+        switchTab(2); break;
+    case ids::M_VIEW_GRPEDIT:
+        switchTab(3); break;
     case ids::M_VIEW_ZOOM_IN:
         g.zoom = min(g.zoom + (g.zoom >> 3) + 1, 65536); refreshAllViews(); break;
     case ids::M_VIEW_ZOOM_OUT:
@@ -3763,6 +6439,8 @@ static void handleCommand(HWND hwnd, int id)
         zAdjustSelection(+1024); break;
     case ids::M_TEXTURE_GOTO:
         gotoTileDialog(); break;
+    case ids::M_TEXTURE_TOGGLE_SIZE:
+        toggleTextureBarSize(); break;
     case ids::M_HELP_KEYS:
         showKeyboardHelp(); break;
     }
@@ -3784,18 +6462,199 @@ static LRESULT CALLBACK Host3DProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     return DefWindowProcA(hwnd, msg, wp, lp);
 }
 
+static void drawDarkTabItem(const DRAWITEMSTRUCT* dis)
+{
+    if (!dis || !dis->hwndItem) return;
+
+    RECT r = dis->rcItem;
+    const bool selected = (dis->itemState & ODS_SELECTED) != 0 ||
+        TabCtrl_GetCurSel(dis->hwndItem) == static_cast<int>(dis->itemID);
+
+    fillRectColor(dis->hDC, r, selected ? theme::PanelBg : theme::WindowBg);
+    drawRectFrame(dis->hDC, r, selected ? theme::Accent : theme::Border);
+
+    char text[80] = {};
+    TCITEMA item{};
+    item.mask = TCIF_TEXT;
+    item.pszText = text;
+    item.cchTextMax = sizeof(text);
+    TabCtrl_GetItem(dis->hwndItem, static_cast<int>(dis->itemID), &item);
+
+    SetBkMode(dis->hDC, TRANSPARENT);
+    SetTextColor(dis->hDC, selected ? theme::Text : theme::MutedText);
+    InflateRect(&r, -10, 0);
+    DrawTextA(dis->hDC, text, -1, &r, DT_SINGLELINE | DT_CENTER | DT_VCENTER | DT_END_ELLIPSIS);
+}
+
+static void drawDarkTabLabel(HWND tab, HDC hdc, int index, bool selected)
+{
+    RECT r{};
+    if (!TabCtrl_GetItemRect(tab, index, &r)) return;
+
+    // Keep selected tabs visually connected to the dark pane and non-selected
+    // tabs slightly recessed, matching the rest of the dark editor chrome.
+    RECT fill = r;
+    if (selected)
+    {
+        fill.top = max(0, fill.top - 1);
+        fill.bottom += 2;
+    }
+    else
+    {
+        fill.top += 2;
+    }
+
+    fillRectColor(hdc, fill, selected ? theme::PanelBg : theme::WindowBg);
+    drawRectFrame(hdc, fill, selected ? theme::Accent : theme::Border);
+
+    if (selected)
+    {
+        // Cover the lower border of the active tab so it blends into the page.
+        RECT seam = fill;
+        seam.top = seam.bottom - 2;
+        fillRectColor(hdc, seam, theme::PanelBg);
+    }
+
+    char text[96] = {};
+    TCITEMA item{};
+    item.mask = TCIF_TEXT;
+    item.pszText = text;
+    item.cchTextMax = sizeof(text);
+    TabCtrl_GetItem(tab, index, &item);
+
+    RECT textRc = r;
+    InflateRect(&textRc, -12, 0);
+    if (selected) textRc.top = max(0, textRc.top - 1);
+
+    SetBkMode(hdc, TRANSPARENT);
+    SetTextColor(hdc, selected ? theme::Text : theme::MutedText);
+    HFONT oldFont = reinterpret_cast<HFONT>(SelectObject(hdc, GetStockObject(DEFAULT_GUI_FONT)));
+    DrawTextA(hdc, text, -1, &textRc, DT_SINGLELINE | DT_CENTER | DT_VCENTER | DT_END_ELLIPSIS);
+    if (oldFont) SelectObject(hdc, oldFont);
+}
+
+static void drawDarkTabControl(HWND hwnd, HDC hdc)
+{
+    RECT rc{};
+    GetClientRect(hwnd, &rc);
+    fillRectColor(hdc, rc, theme::WindowBg);
+
+    RECT pane = rc;
+    TabCtrl_AdjustRect(hwnd, FALSE, &pane);
+    pane.left = max(rc.left, pane.left);
+    pane.top = max(rc.top, pane.top);
+    pane.right = min(rc.right, pane.right);
+    pane.bottom = min(rc.bottom, pane.bottom);
+
+    if (pane.right > pane.left && pane.bottom > pane.top)
+    {
+        fillRectColor(hdc, pane, theme::PanelBg);
+        drawRectFrame(hdc, pane, theme::Border);
+
+        RECT inner = pane;
+        InflateRect(&inner, -1, -1);
+        if (inner.right > inner.left && inner.bottom > inner.top)
+            drawRectFrame(hdc, inner, RGB(38, 40, 46));
+    }
+
+    const int count = TabCtrl_GetItemCount(hwnd);
+    const int selected = TabCtrl_GetCurSel(hwnd);
+
+    for (int i = 0; i < count; ++i)
+    {
+        if (i != selected) drawDarkTabLabel(hwnd, hdc, i, false);
+    }
+    if (selected >= 0 && selected < count)
+        drawDarkTabLabel(hwnd, hdc, selected, true);
+}
+
+static LRESULT CALLBACK DarkTabProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
+{
+    switch (msg)
+    {
+    case WM_ERASEBKGND:
+    {
+        HDC hdc = reinterpret_cast<HDC>(wp);
+        RECT rc{};
+        GetClientRect(hwnd, &rc);
+        fillRectColor(hdc, rc, theme::WindowBg);
+        return 1;
+    }
+    case WM_PAINT:
+    {
+        PAINTSTRUCT ps{};
+        HDC hdc = BeginPaint(hwnd, &ps);
+        drawDarkTabControl(hwnd, hdc);
+        EndPaint(hwnd, &ps);
+        return 0;
+    }
+    case WM_PRINTCLIENT:
+    {
+        HDC hdc = reinterpret_cast<HDC>(wp);
+        drawDarkTabControl(hwnd, hdc);
+        return 0;
+    }
+    case WM_THEMECHANGED:
+    case WM_SETTINGCHANGE:
+        InvalidateRect(hwnd, nullptr, TRUE);
+        break;
+    }
+
+    if (g.oldTabProc)
+        return CallWindowProcA(g.oldTabProc, hwnd, msg, wp, lp);
+    return DefWindowProcA(hwnd, msg, wp, lp);
+}
+
+static void subclassDarkTabControl(HWND hwnd)
+{
+    if (!hwnd || g.oldTabProc) return;
+
+    // The normal themed tab control still paints a light page border even when
+    // TCS_OWNERDRAWFIXED is used.  Subclass it so the whole tab frame and page
+    // border are painted with our dark colors.
+    g.oldTabProc = reinterpret_cast<WNDPROC>(SetWindowLongPtrA(hwnd, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(DarkTabProc)));
+    RedrawWindow(hwnd, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_FRAME);
+}
+
 static LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
     switch (msg)
     {
     case WM_ERASEBKGND:
+    {
+        HDC hdc = reinterpret_cast<HDC>(wp);
+        RECT rc{};
+        GetClientRect(hwnd, &rc);
+        fillRectColor(hdc, rc, theme::WindowBg);
         return 1;
+    }
+    case WM_NCPAINT:
+    {
+        LRESULT result = DefWindowProcA(hwnd, msg, wp, lp);
+        paintDarkWindowBorder(hwnd);
+        return result;
+    }
+    case WM_NCACTIVATE:
+    {
+        LRESULT result = DefWindowProcA(hwnd, msg, wp, lp);
+        enableDarkTitleBar(hwnd);
+        paintDarkWindowBorder(hwnd);
+        return result;
+    }
+    case WM_ACTIVATE:
+    case WM_THEMECHANGED:
+    case WM_SETTINGCHANGE:
+        enableDarkTitleBar(hwnd);
+        paintDarkWindowBorder(hwnd);
+        break;
     case WM_CREATE:
     {
         g.main = hwnd;
+        enableDarkTitleBar(hwnd);
         SetMenu(hwnd, makeMainMenu());
+        DrawMenuBar(hwnd);
 
-        g.tab = CreateWindowExA(0, WC_TABCONTROLA, "", WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,
+        g.tab = CreateWindowExA(0, WC_TABCONTROLA, "", WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_CLIPCHILDREN | TCS_OWNERDRAWFIXED,
             0, 0, 100, 100, hwnd, reinterpret_cast<HMENU>(ids::ID_TAB), g.inst, nullptr);
         TCITEMA item{};
         item.mask = TCIF_TEXT;
@@ -3803,16 +6662,27 @@ static LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         TabCtrl_InsertItem(g.tab, 0, &item);
         item.pszText = const_cast<char*>("3D Editor");
         TabCtrl_InsertItem(g.tab, 1, &item);
+        item.pszText = const_cast<char*>("Tile Art");
+        TabCtrl_InsertItem(g.tab, 2, &item);
+        item.pszText = const_cast<char*>("GRP Edit");
+        TabCtrl_InsertItem(g.tab, 3, &item);
+        subclassDarkTabControl(g.tab);
 
-        g.view2d = CreateWindowExA(WS_EX_CLIENTEDGE, "BuildEditor2DView", "", WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_TABSTOP,
+        g.view2d = CreateWindowExA(0, "BuildEditor2DView", "", WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_TABSTOP,
             0, 0, 100, 100, g.tab, reinterpret_cast<HMENU>(ids::ID_VIEW2D), g.inst, nullptr);
-        g.host3d = CreateWindowExA(WS_EX_CLIENTEDGE, "BuildEditor3DHost", "", WS_CHILD | WS_CLIPSIBLINGS | WS_TABSTOP,
+        g.host3d = CreateWindowExA(0, "BuildEditor3DHost", "", WS_CHILD | WS_CLIPSIBLINGS | WS_TABSTOP,
             0, 0, 100, 100, g.tab, reinterpret_cast<HMENU>(ids::ID_HOST3D), g.inst, nullptr);
-        g.textureBar = CreateWindowExA(WS_EX_CLIENTEDGE, "BuildEditorTextureBar", "", WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,
+        g.tileArt = CreateWindowExA(0, "BuildEditorTileArt", "", WS_CHILD | WS_CLIPSIBLINGS | WS_TABSTOP,
+            0, 0, 100, 100, g.tab, reinterpret_cast<HMENU>(ids::ID_TILEART), g.inst, nullptr);
+        g.grpEdit = CreateWindowExA(0, "BuildEditorGrpEdit", "", WS_CHILD | WS_CLIPSIBLINGS | WS_TABSTOP,
+            0, 0, 100, 100, g.tab, reinterpret_cast<HMENU>(ids::ID_GRPEDIT), g.inst, nullptr);
+        g.textureBar = CreateWindowExA(0, "BuildEditorTextureBar", "", WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,
             0, 0, 100, TEXTURE_BAR_HEIGHT, hwnd, reinterpret_cast<HMENU>(ids::ID_TEXTUREBAR), g.inst, nullptr);
-        g.inspector = CreateWindowExA(WS_EX_CLIENTEDGE, "BuildEditorInspector", "", WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,
+        g.inspector = CreateWindowExA(0, "BuildEditorInspector", "", WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,
             0, 0, 100, 100, hwnd, reinterpret_cast<HMENU>(ids::ID_INSPECTOR), g.inst, nullptr);
         updateInspector();
+        updateTileArtPanel();
+        updateGrpEditPanel();
 
         QueryPerformanceFrequency(&g.freq);
         QueryPerformanceCounter(&g.lastTick);
@@ -3824,6 +6694,36 @@ static LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_SIZE:
         layoutChildren(hwnd);
         return 0;
+    case WM_MEASUREITEM:
+    {
+        MEASUREITEMSTRUCT* mis = reinterpret_cast<MEASUREITEMSTRUCT*>(lp);
+        if (mis && mis->CtlType == ODT_MENU)
+        {
+            measureDarkMenuItem(mis);
+            return TRUE;
+        }
+        break;
+    }
+    case WM_DRAWITEM:
+    {
+        DRAWITEMSTRUCT* dis = reinterpret_cast<DRAWITEMSTRUCT*>(lp);
+        if (dis && dis->CtlType == ODT_MENU)
+        {
+            drawDarkMenuItem(dis);
+            return TRUE;
+        }
+        if (dis && dis->CtlID == ids::ID_TAB)
+        {
+            drawDarkTabItem(dis);
+            return TRUE;
+        }
+        break;
+    }
+    case WM_CTLCOLORSTATIC:
+    case WM_CTLCOLOREDIT:
+    case WM_CTLCOLORLISTBOX:
+    case WM_CTLCOLORBTN:
+        return darkCtlColor(msg, wp);
     case WM_NOTIFY:
         if (reinterpret_cast<NMHDR*>(lp)->hwndFrom == g.tab && reinterpret_cast<NMHDR*>(lp)->code == TCN_SELCHANGE)
             switchTab(TabCtrl_GetCurSel(g.tab));
@@ -3844,6 +6744,9 @@ static LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         }
         if (wp == VK_F2) { switchTab(0); return 0; }
         if (wp == VK_F3) { switchTab(1); return 0; }
+        if (wp == VK_F4) { switchTab(2); return 0; }
+        if (wp == VK_F5) { runCurrentMap(); return 0; }
+        if (wp == VK_F6) { switchTab(3); return 0; }
         break;
     case WM_CLOSE:
         if (!confirmDiscardChanges()) return 0;
@@ -3851,8 +6754,17 @@ static LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         return 0;
     case WM_DESTROY:
         KillTimer(hwnd, ids::TIMER_RENDER);
+        if (g.inspFont) { DeleteObject(g.inspFont); g.inspFont = nullptr; }
+        if (g.inspBoldFont) { DeleteObject(g.inspBoldFont); g.inspBoldFont = nullptr; }
         uninitengine();
         uninitgroupfile();
+        if (g.gdiplusToken)
+        {
+            Gdiplus::GdiplusShutdown(g.gdiplusToken);
+            g.gdiplusToken = 0;
+        }
+        releaseDarkMenuData();
+        releaseThemeBrushes();
         PostQuitMessage(0);
         return 0;
     }
@@ -3864,7 +6776,7 @@ static void registerWindowClasses(HINSTANCE inst)
     WNDCLASSA wc{};
     wc.hInstance = inst;
     wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
-    wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+    wc.hbrBackground = themeWindowBrush();
     wc.style = CS_DBLCLKS;
 
     wc.lpfnWndProc = MainProc;
@@ -3884,15 +6796,27 @@ static void registerWindowClasses(HINSTANCE inst)
     RegisterClassA(&wc);
 
     wc.style = CS_DBLCLKS;
+    wc.lpfnWndProc = TileArtProc;
+    wc.lpszClassName = "BuildEditorTileArt";
+    wc.hbrBackground = themePanelBrush();
+    RegisterClassA(&wc);
+
+    wc.style = CS_DBLCLKS;
+    wc.lpfnWndProc = GrpEditProc;
+    wc.lpszClassName = "BuildEditorGrpEdit";
+    wc.hbrBackground = themePanelBrush();
+    RegisterClassA(&wc);
+
+    wc.style = CS_DBLCLKS;
     wc.lpfnWndProc = TextureBarProc;
     wc.lpszClassName = "BuildEditorTextureBar";
-    wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_BTNFACE + 1);
+    wc.hbrBackground = themePanelBrush();
     RegisterClassA(&wc);
 
     wc.style = CS_DBLCLKS;
     wc.lpfnWndProc = InspectorProc;
     wc.lpszClassName = "BuildEditorInspector";
-    wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_BTNFACE + 1);
+    wc.hbrBackground = themePanelBrush();
     wc.hIcon = nullptr;
     RegisterClassA(&wc);
 }
@@ -3900,10 +6824,15 @@ static void registerWindowClasses(HINSTANCE inst)
 int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR lpCmdLine, int nCmdShow)
 {
     g.inst = hInst;
+    enableProcessDarkMode();
     INITCOMMONCONTROLSEX icc{};
     icc.dwSize = sizeof(icc);
     icc.dwICC = ICC_TAB_CLASSES | ICC_STANDARD_CLASSES;
     InitCommonControlsEx(&icc);
+
+    Gdiplus::GdiplusStartupInput gdiplusInput;
+    if (Gdiplus::GdiplusStartup(&g.gdiplusToken, &gdiplusInput, nullptr) != Gdiplus::Ok)
+        g.gdiplusToken = 0;
 
     registerWindowClasses(hInst);
     loadBuildAssets();
@@ -3930,8 +6859,12 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR lpCmdLine, int nCmdShow)
     if (!hwnd) return 1;
 
     g.main = hwnd;
+    enableDarkTitleBar(hwnd);
     updateTitle();
-    ShowWindow(hwnd, nCmdShow);
+    ShowWindow(hwnd, SW_SHOWMAXIMIZED);
+    enableDarkTitleBar(hwnd);
+    paintDarkWindowBorder(hwnd);
+    DrawMenuBar(hwnd);
     UpdateWindow(hwnd);
 
     if (!initialMap.empty() && initialLoaded)
@@ -3940,6 +6873,14 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR lpCmdLine, int nCmdShow)
     MSG msg{};
     while (GetMessageA(&msg, nullptr, 0, 0) > 0)
     {
+        if (msg.message == WM_KEYDOWN)
+        {
+            if (msg.wParam == VK_F2) { switchTab(0); continue; }
+            if (msg.wParam == VK_F3) { switchTab(1); continue; }
+            if (msg.wParam == VK_F4) { switchTab(2); continue; }
+            if (msg.wParam == VK_F5) { runCurrentMap(); continue; }
+            if (msg.wParam == VK_F6) { switchTab(3); continue; }
+        }
         TranslateMessage(&msg);
         DispatchMessageA(&msg);
     }
