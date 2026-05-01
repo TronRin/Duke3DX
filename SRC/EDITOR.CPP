@@ -87,6 +87,14 @@ namespace ids
         ID_INSP_USE_TILE,
         ID_INSP_APPLY,
         ID_INSP_REFRESH,
+        ID_INSP_TYPE_EDIT,
+        ID_INSP_OBJ_HITAG_EDIT,
+        ID_INSP_EXTRA_EDIT,
+        ID_INSP_CSTAT_EDIT,
+        ID_INSP_STATNUM_EDIT,
+        ID_INSP_ANG_EDIT,
+        ID_INSP_BLOOD_PRESET,
+        ID_INSP_BLOOD_FIXUP,
 
         ID_ART_TILE_EDIT = 1300,
         ID_ART_USE_SELECTED,
@@ -148,6 +156,9 @@ namespace ids
         M_TOOLS_SHADE_DOWN,
         M_TOOLS_Z_UP,
         M_TOOLS_Z_DOWN,
+        M_BLOOD_SPRITE_PRESET,
+        M_BLOOD_FIXUP_SELECTION,
+        M_BLOOD_FIXUP_MAP,
         M_TEXTURE_GOTO,
         M_TEXTURE_TOGGLE_SIZE,
         M_HELP_KEYS,
@@ -172,6 +183,14 @@ enum SearchStat : int
     SS_FLOOR = 2,
     SS_SPRITE = 3,
     SS_MASKED_WALL = 4,
+};
+
+
+enum class GameProfile : int
+{
+    Duke3D = 0,
+    ShadowWarrior = 1,
+    Blood = 2,
 };
 
 struct Selection
@@ -243,6 +262,16 @@ struct AppState
     HWND inspVisEdit = nullptr;
     HWND inspLotagEdit = nullptr;
     HWND inspHitagEdit = nullptr;
+    HWND inspBloodGroup = nullptr;
+    HWND inspBloodTitle = nullptr;
+    HWND inspTypeEdit = nullptr;
+    HWND inspObjHitagEdit = nullptr;
+    HWND inspExtraEdit = nullptr;
+    HWND inspCstatEdit = nullptr;
+    HWND inspStatnumEdit = nullptr;
+    HWND inspAngEdit = nullptr;
+    HWND inspBloodPresetButton = nullptr;
+    HWND inspBloodFixupButton = nullptr;
     HWND inspUseTileButton = nullptr;
     HWND inspApplyButton = nullptr;
     HWND inspRefreshButton = nullptr;
@@ -267,6 +296,14 @@ struct AppState
     HWND engine = nullptr;
     WNDPROC oldEngineProc = nullptr;
     WNDPROC oldTabProc = nullptr;
+
+    GameProfile game = GameProfile::Duke3D;
+    std::string bloodDataPath;
+    std::string bloodRffPath;
+    std::string bloodExtractPath;
+    bool bloodRffPrepared = false;
+    std::string bloodTempArtPath;
+    std::vector<std::string> bloodTempFiles;
 
     bool engineCreated = false;
     bool running = true;
@@ -332,6 +369,516 @@ struct AppState
 };
 
 static AppState g;
+
+
+// -----------------------------------------------------------------------------
+// Game profile and Blood metadata.
+// -----------------------------------------------------------------------------
+static const char* gameProfileName(GameProfile profile)
+{
+    switch (profile)
+    {
+    case GameProfile::Duke3D: return "Duke Nukem 3D";
+    case GameProfile::ShadowWarrior: return "Shadow Warrior";
+    case GameProfile::Blood: return "Blood";
+    default: return "Unknown";
+    }
+}
+
+static bool isBloodMode()
+{
+    return g.game == GameProfile::Blood;
+}
+
+static bool isDukeMode()
+{
+    return g.game == GameProfile::Duke3D;
+}
+
+struct BloodName
+{
+    int id;
+    const char* name;
+};
+
+struct BloodSpriteDefault
+{
+    short type;
+    short picnum;
+    short xrepeat;
+    short yrepeat;
+    signed char cstat256; // -1 leave as-is, 0 clear blocking-hitscan bit, 1 set it.
+    short pal;
+};
+
+static const BloodName kBloodSpriteTypeNames[] =
+{
+    { 0, "Decoration" },
+    { 1, "Player Start" },
+    { 2, "Bloodbath Start" },
+    { 3, "Off marker" },
+    { 4, "On marker" },
+    { 5, "Axis marker" },
+    { 6, "Lower link" },
+    { 7, "Upper link" },
+    { 8, "Teleport target" },
+    { 10, "Lower water" },
+    { 9, "Upper water" },
+    { 12, "Lower stack" },
+    { 11, "Upper stack" },
+    { 14, "Lower goo" },
+    { 13, "Upper goo" },
+    { 15, "Path marker" },
+    { 16, "Alignable Region" },
+    { 17, "Base Region" },
+    { 18, "Dude Spawn" },
+    { 19, "Earthquake" },
+    { 20, "Toggle switch" },
+    { 21, "1-Way switch" },
+    { 22, "Combination switch" },
+    { 23, "Padlock (1-shot)" },
+    { 30, "Torch" },
+    { 32, "Candle" },
+    { 40, "Sprite type 40" },
+    { 47, "Sprite type 47" },
+    { 43, "Sprite type 43" },
+    { 41, "Sprite type 41" },
+    { 42, "Sprite type 42" },
+    { 46, "Sprite type 46" },
+    { 49, "Sprite type 49" },
+    { 48, "Sprite type 48" },
+    { 45, "Sprite type 45" },
+    { 50, "Sprite type 50" },
+    { 44, "Sprite type 44" },
+    { 60, "Sprite type 60" },
+    { 62, "Sprite type 62" },
+    { 63, "Sprite type 63" },
+    { 64, "Sprite type 64" },
+    { 65, "Sprite type 65" },
+    { 67, "Sprite type 67" },
+    { 68, "Sprite type 68" },
+    { 69, "Sprite type 69" },
+    { 70, "Sprite type 70" },
+    { 72, "Sprite type 72" },
+    { 73, "Sprite type 73" },
+    { 76, "Sprite type 76" },
+    { 79, "Sprite type 79" },
+    { 66, "Sprite type 66" },
+    { 80, "Random Ammo" },
+    { 100, "Sprite type 100" },
+    { 101, "Sprite type 101" },
+    { 102, "Sprite type 102" },
+    { 103, "Sprite type 103" },
+    { 104, "Sprite type 104" },
+    { 105, "Sprite type 105" },
+    { 106, "Sprite type 106" },
+    { 107, "Sprite type 107" },
+    { 108, "Sprite type 108" },
+    { 109, "Sprite type 109" },
+    { 110, "Sprite type 110" },
+    { 111, "Sprite type 111" },
+    { 112, "Sprite type 112" },
+    { 113, "Sprite type 113" },
+    { 114, "Sprite type 114" },
+    { 115, "Sprite type 115" },
+    { 116, "Sprite type 116" },
+    { 117, "Sprite type 117" },
+    { 118, "Sprite type 118" },
+    { 119, "Sprite type 119" },
+    { 120, "Sprite type 120" },
+    { 121, "Sprite type 121" },
+    { 122, "Sprite type 122" },
+    { 123, "Sprite type 123" },
+    { 124, "Sprite type 124" },
+    { 125, "Sprite type 125" },
+    { 126, "Sprite type 126" },
+    { 127, "Sprite type 127" },
+    { 128, "Sprite type 128" },
+    { 129, "Sprite type 129" },
+    { 130, "Sprite type 130" },
+    { 131, "Sprite type 131" },
+    { 132, "Sprite type 132" },
+    { 133, "Sprite type 133" },
+    { 134, "Sprite type 134" },
+    { 135, "Sprite type 135" },
+    { 136, "Sprite type 136" },
+    { 137, "Sprite type 137" },
+    { 138, "Sprite type 138" },
+    { 139, "Sprite type 139" },
+    { 140, "Sprite type 140" },
+    { 141, "Sprite type 141" },
+    { 142, "Sprite type 142" },
+    { 143, "Sprite type 143" },
+    { 144, "Sprite type 144" },
+    { 145, "Sprite type 145" },
+    { 146, "Sprite type 146" },
+    { 200, "Random Creature" },
+    { 201, "Cultist w/Tommy" },
+    { 202, "Cultist w/Shotgun" },
+    { 247, "Cultist w/Tesla" },
+    { 248, "Cultist w/Dynamite" },
+    { 249, "Beast Cultist" },
+    { 250, "Tiny Caleb" },
+    { 251, "Beast" },
+    { 203, "Axe Zombie" },
+    { 204, "Fat Zombie" },
+    { 205, "Earth Zombie" },
+    { 244, "Sleep Zombie" },
+    { 245, "Innocent" },
+    { 206, "Flesh Gargoyle" },
+    { 207, "Stone Gargoyle" },
+    { 208, "Flesh Statue" },
+    { 209, "Stone Statue" },
+    { 210, "Phantasm" },
+    { 211, "Hound" },
+    { 212, "Hand" },
+    { 213, "Brown Spider" },
+    { 214, "Red Spider" },
+    { 216, "Mother Spider" },
+    { 215, "Black Spider" },
+    { 217, "GillBeast" },
+    { 218, "Eel" },
+    { 219, "Bat" },
+    { 220, "Rat" },
+    { 221, "Green Pod" },
+    { 222, "Green Tentacle" },
+    { 223, "Fire Pod" },
+    { 224, "Fire Tentacle" },
+    { 225, "Mother Pod" },
+    { 226, "Mother Tentacle" },
+    { 227, "Cerberus" },
+    { 229, "Tchernobog" },
+    { 230, "TCultist prone" },
+    { 246, "SCultist prone" },
+    { 400, "TNT Barrel" },
+    { 401, "Armed Prox Bomb" },
+    { 402, "Armed Remote" },
+    { 403, "Blue Vase" },
+    { 404, "Brown Vase" },
+    { 405, "Crate Face" },
+    { 406, "Glass Window" },
+    { 407, "Fluorescent Light" },
+    { 408, "Wall Crack" },
+    { 409, "Wood Beam" },
+    { 410, "Spider's Web" },
+    { 411, "MetalGrate1" },
+    { 412, "FlammableTree" },
+    { 413, "Machine Gun" },
+    { 414, "Falling Rock" },
+    { 415, "Kickable Pail" },
+    { 416, "Gib Object" },
+    { 417, "Explode Object" },
+    { 427, "Zombie Head" },
+    { 450, "Spike Trap" },
+    { 451, "Rock Trap" },
+    { 452, "Flame Trap" },
+    { 454, "Saw Blade" },
+    { 455, "Electric Zap" },
+    { 456, "Switched Zap" },
+    { 457, "Pendulum" },
+    { 458, "Guillotine" },
+    { 459, "Hidden Exploder" },
+    { 700, "Trigger Gen" },
+    { 701, "WaterDrip Gen" },
+    { 702, "BloodDrip Gen" },
+    { 703, "Fireball Gen" },
+    { 704, "EctoSkull Gen" },
+    { 705, "Dart Gen" },
+    { 706, "Bubble Gen" },
+    { 707, "Multi-Bubble Gen" },
+    { 708, "SFX Gen" },
+    { 709, "Sector SFX" },
+    { 710, "Ambient SFX" },
+    { 711, "Player SFX" },
+};
+
+static const BloodName kBloodWallTypeNames[] =
+{
+    { 0, "Normal" },
+    { 20, "Toggle switch" },
+    { 21, "1-Way switch" },
+    { 500, "Wall Link" },
+    { 501, "Wall Stack (unsupp.)" },
+    { 511, "Gib Wall" },
+};
+
+static const BloodName kBloodSectorTypeNames[] =
+{
+    { 0, "Normal" },
+    { 600, "Z Motion" },
+    { 602, "Z Motion SPRITE" },
+    { 603, "Warp" },
+    { 604, "Teleporter" },
+    { 614, "Slide Marked" },
+    { 615, "Rotate Marked" },
+    { 616, "Slide" },
+    { 617, "Rotate" },
+    { 613, "Step Rotate" },
+    { 612, "Path Sector" },
+    { 618, "Damage Sector" },
+    { 619, "Counter Sector" },
+};
+
+static const BloodName kBloodTransitionWaveNames[] =
+{
+    { 1, "Linear" },
+    { 0, "Sine" },
+    { 2, "SlowOff" },
+    { 3, "SlowOn" },
+};
+
+static const BloodName kBloodWaveNames[] =
+{
+    { 0, "None" },
+    { 1, "Square" },
+    { 2, "Saw" },
+    { 3, "Ramp up" },
+    { 4, "Ramp down" },
+    { 5, "Sine" },
+    { 6, "Flicker1" },
+    { 7, "Flicker2" },
+    { 8, "Flicker3" },
+    { 9, "Flicker4" },
+    { 10, "Strobe" },
+    { 11, "Search" },
+};
+
+static const BloodName kBloodCommandNames[] =
+{
+    { 0, "OFF" },
+    { 1, "ON" },
+    { 2, "State" },
+    { 3, "Toggle" },
+    { 4, "!State" },
+    { 5, "Link" },
+    { 6, "Lock" },
+    { 7, "Unlock" },
+    { 8, "Toggle Lock" },
+    { 9, "Stop OFF" },
+    { 10, "Stop ON" },
+    { 11, "Stop Next" },
+};
+
+static const BloodName kBloodRespawnNames[] =
+{
+    { 0, "Optional" },
+    { 1, "Never" },
+    { 2, "Always" },
+    { 3, "Permanent" },
+};
+
+static const BloodSpriteDefault kBloodSpriteDefaults[] =
+{
+    { 1, -1, -1, -1, 0, 0 },
+    { 2, -1, -1, -1, 0, 5 },
+    { 6, 2331, 64, 64, 0, 0 },
+    { 7, 2332, 64, 64, 0, 0 },
+    { 10, 2331, 64, 64, 0, 0 },
+    { 9, 2332, 64, 64, 0, 0 },
+    { 12, 2331, 64, 64, 0, 0 },
+    { 11, 2332, 64, 64, 0, 0 },
+    { 14, 2331, 64, 64, 0, 0 },
+    { 13, 2332, 64, 64, 0, 0 },
+    { 15, 2319, 64, 64, 0, 0 },
+    { 18, 2077, 64, 64, 0, 0 },
+    { 19, 2072, 64, 64, 0, 0 },
+    { 20, -1, -1, -1, 1, -1 },
+    { 21, -1, -1, -1, 1, -1 },
+    { 22, -1, -1, -1, 1, -1 },
+    { 23, 948, -1, -1, 1, -1 },
+    { 30, 550, -1, -1, 1, -1 },
+    { 30, 572, -1, -1, 1, -1 },
+    { 30, 560, -1, -1, 1, -1 },
+    { 30, 564, -1, -1, 1, -1 },
+    { 30, 570, -1, -1, 1, -1 },
+    { 30, 554, -1, -1, 1, -1 },
+    { 32, 938, -1, -1, 1, -1 },
+    { 40, 832, 48, 48, 0, 0 },
+    { 43, 524, 48, 48, 0, 0 },
+    { 41, 559, 48, 48, 0, 0 },
+    { 42, 558, 48, 48, 0, 0 },
+    { 46, 526, 48, 48, 0, 0 },
+    { 45, 539, 48, 48, 0, 0 },
+    { 50, 800, 48, 48, 0, 0 },
+    { 60, 618, 40, 40, 1, 0 },
+    { 62, 589, 48, 48, 1, 0 },
+    { 63, 809, 48, 48, 1, 0 },
+    { 64, 811, 40, 40, 0, 0 },
+    { 65, 810, 40, 40, 0, 0 },
+    { 66, 820, 24, 24, 0, 0 },
+    { 67, 619, 48, 48, 0, 0 },
+    { 68, 812, 48, 48, 0, 0 },
+    { 69, 813, 48, 48, 0, 0 },
+    { 70, 525, 48, 48, 0, 0 },
+    { 72, 817, 48, 48, 0, 0 },
+    { 73, 548, 24, 24, 0, 0 },
+    { 76, 816, 48, 48, 0, 0 },
+    { 79, 801, 48, 48, 0, 0 },
+    { 80, 832, 40, 40, 0, 0 },
+    { 100, 2552, 32, 32, 0, 0 },
+    { 101, 2553, 32, 32, 0, 0 },
+    { 102, 2554, 32, 32, 0, 0 },
+    { 103, 2555, 32, 32, 0, 0 },
+    { 104, 2556, 32, 32, 0, 0 },
+    { 105, 2557, 32, 32, 0, 0 },
+    { 106, -1, -1, -1, 0, 0 },
+    { 107, 519, 48, 48, 0, 0 },
+    { 108, 822, 40, 40, 0, 0 },
+    { 109, 2169, 40, 40, 0, 0 },
+    { 110, 2433, 40, 40, 0, 0 },
+    { 113, 896, 40, 40, 0, 0 },
+    { 114, 825, 40, 40, 0, 0 },
+    { 115, 827, 40, 40, 0, 0 },
+    { 117, 829, 40, 40, 0, 0 },
+    { 118, 830, 80, 64, 0, 0 },
+    { 121, 760, 40, 40, 0, 0 },
+    { 124, 2428, 40, 40, 0, 0 },
+    { 125, 839, 40, 40, 0, 0 },
+    { 127, 840, 48, 48, 0, 0 },
+    { 128, 841, 48, 48, 0, 0 },
+    { 129, 842, 48, 48, 0, 0 },
+    { 130, 843, 48, 48, 0, 0 },
+    { 136, 518, 40, 40, 0, 0 },
+    { 137, 522, 40, 40, 0, 0 },
+    { 138, 523, 40, 40, 0, 0 },
+    { 140, 2628, 64, 64, 0, 0 },
+    { 141, 2586, 64, 64, 0, 0 },
+    { 142, 2578, 64, 64, 0, 0 },
+    { 143, 2602, 64, 64, 0, 0 },
+    { 144, 2594, 64, 64, 0, 0 },
+    { 144, 2594, 64, 64, 0, 0 },
+    { 145, -1, 64, 64, 1, 0 },
+    { 146, -1, 64, 64, 1, 0 },
+    { 200, 832, 64, 64, 1, 0 },
+    { 201, 2820, 40, 40, 1, 3 },
+    { 202, 2825, 40, 40, 1, 0 },
+    { 247, 2820, 40, 40, 1, 11 },
+    { 248, 2820, 40, 40, 1, 13 },
+    { 249, 2825, 48, 48, 1, 12 },
+    { 250, 3870, 16, 16, 1, 12 },
+    { 251, 2960, 48, 48, 1, 0 },
+    { 203, 1170, 40, 40, 1, 0 },
+    { 204, 1370, 48, 48, 1, 0 },
+    { 205, 3054, 40, 40, 1, 0 },
+    { 244, 1209, 40, 40, 1, 0 },
+    { 245, 3798, 40, 40, 1, 0 },
+    { 206, 1470, 40, 40, 1, 0 },
+    { 207, 1470, 40, 40, 1, 5 },
+    { 208, 1530, 40, 40, 1, 0 },
+    { 209, 1530, 40, 40, 1, 5 },
+    { 210, 3060, 40, 40, 1, 0 },
+    { 211, 1270, 40, 40, 1, 0 },
+    { 212, 1980, 32, 32, 1, 0 },
+    { 213, 1920, 16, 16, 1, 7 },
+    { 214, 1925, 24, 24, 1, 4 },
+    { 216, 1930, 40, 40, 1, 0 },
+    { 215, 1935, 32, 32, 1, 4 },
+    { 217, 1570, 48, 48, 1, 0 },
+    { 218, 1870, 32, 32, 1, 0 },
+    { 219, 1948, 32, 32, 1, 0 },
+    { 220, 1745, 24, 24, 1, 0 },
+    { 221, 1792, 32, 32, 1, 0 },
+    { 222, 1797, 32, 32, 1, 0 },
+    { 223, 1792, 48, 48, 1, 2 },
+    { 224, 1797, 48, 48, 1, 2 },
+    { 225, 1792, 64, 64, 1, 6 },
+    { 226, 1797, 64, 64, 1, 6 },
+    { 227, 2680, 64, 64, 1, 0 },
+    { 229, 3140, 64, 64, 1, 0 },
+    { 230, 3385, 40, 40, 1, 3 },
+    { 231, 2860, 40, 40, 1, 0 },
+    { 232, 2860, 40, 40, 1, 0 },
+    { 233, 2860, 40, 40, 1, 0 },
+    { 234, 2860, 40, 40, 1, 0 },
+    { 235, 2860, 40, 40, 1, 0 },
+    { 236, 2860, 40, 40, 1, 0 },
+    { 237, 2860, 40, 40, 1, 0 },
+    { 238, 2860, 40, 40, 1, 0 },
+    { 243, 2860, 40, 40, 1, 0 },
+    { 246, 3385, 40, 40, 1, 0 },
+    { 400, 907, 64, 64, 1, 0 },
+    { 401, 3444, 40, 40, 1, 0 },
+    { 402, 3457, 40, 40, 1, 0 },
+    { 403, 739, -1, -1, 1, 0 },
+    { 404, 642, -1, -1, 1, 0 },
+    { 405, 462, -1, -1, 1, 0 },
+    { 406, 266, -1, -1, 1, 0 },
+    { 407, 796, -1, -1, 1, 0 },
+    { 408, -1, -1, -1, 0, -1 },
+    { 409, 1142, -1, -1, 1, 0 },
+    { 410, 1069, -1, -1, 1, 0 },
+    { 411, 483, -1, -1, 1, -1 },
+    { 412, -1, -1, -1, 1, -1 },
+    { 413, -1, 64, 64, 0, 0 },
+    { 414, -1, -1, -1, 1, 0 },
+    { 415, -1, 48, 48, 1, 0 },
+    { 416, -1, -1, -1, -1, -1 },
+    { 417, -1, -1, -1, -1, -1 },
+    { 427, -1, 40, 40, 1, -1 },
+    { 450, 968, 64, 64, 0, 0 },
+    { 451, -1, 64, 64, 0, 0 },
+    { 452, 2183, -1, -1, 0, 0 },
+    { 454, 655, -1, -1, 0, 0 },
+    { 455, 1156, -1, -1, 0, 0 },
+    { 456, 1156, -1, -1, 0, 0 },
+    { 457, 1080, -1, -1, 0, 0 },
+    { 458, 835, -1, -1, 0, 0 },
+    { 459, 908, 4, -1, 0, 0 },
+    { 708, 2519, 64, 64, 0, 0 },
+    { 709, 2520, 64, 64, 0, 0 },
+    { 710, 2521, 64, 64, 0, 0 },
+    { 711, 2519, 64, 64, 0, 5 },
+};
+
+
+static const char* bloodLookupName(const BloodName* table, size_t count, int id, const char* fallback = nullptr)
+{
+    if (table)
+    {
+        for (size_t i = 0; i < count; ++i)
+            if (table[i].id == id) return table[i].name;
+    }
+    return fallback ? fallback : "Unknown";
+}
+
+#define BLOOD_COUNT_OF(a) (sizeof(a) / sizeof((a)[0]))
+
+static const char* bloodSpriteTypeName(int type)
+{
+    return bloodLookupName(kBloodSpriteTypeNames, BLOOD_COUNT_OF(kBloodSpriteTypeNames), type, "Decoration");
+}
+
+static const char* bloodWallTypeName(int type)
+{
+    return bloodLookupName(kBloodWallTypeNames, BLOOD_COUNT_OF(kBloodWallTypeNames), type, "Normal");
+}
+
+static const char* bloodSectorTypeName(int type)
+{
+    return bloodLookupName(kBloodSectorTypeNames, BLOOD_COUNT_OF(kBloodSectorTypeNames), type, "Normal");
+}
+
+static const BloodSpriteDefault* bloodSpriteDefaultByTypeOrPic(short type, short picnum)
+{
+    const BloodSpriteDefault* byType = nullptr;
+    const BloodSpriteDefault* byPic = nullptr;
+    for (size_t i = 0; i < BLOOD_COUNT_OF(kBloodSpriteDefaults); ++i)
+    {
+        const BloodSpriteDefault& def = kBloodSpriteDefaults[i];
+        if (!byType && def.type == type) byType = &def;
+        if (!byPic && def.picnum >= 0 && def.picnum == picnum) byPic = &def;
+        if (def.type == type && def.picnum >= 0 && def.picnum == picnum) return &def;
+    }
+    return byType ? byType : byPic;
+}
+
+static std::string bloodTypeLabel(const char* kind, int type, const char* name)
+{
+    char buf[192];
+    std::snprintf(buf, sizeof(buf), "%s type %d: %s", kind ? kind : "Blood", type, name ? name : "Unknown");
+    return buf;
+}
+
 
 // -----------------------------------------------------------------------------
 // Dark theme helpers.
@@ -865,10 +1412,20 @@ static void syncEngineSearchGlobals(const Selection& s);
 static void updateTileArtPanel();
 static void updateGrpEditPanel();
 static void runCurrentMap();
+static void bloodNormalizeMapForBlood(bool quiet);
+static bool bloodChooseAndApplyPresetToSelectedSprite();
+static bool prepareBloodRffCache(const std::string& rffPath);
+static std::string bloodArtPathForLoad();
+static bool loadArtSetFromPathOrFolder(const std::string& artPathOrFolder, const char* statusLabel = nullptr);
+static bool loadBloodArtSetFromCurrentData();
+static bool reloadCurrentGamePalette();
 static bool importSelectedTileFromPng();
 static bool exportSelectedTileToPng();
 static bool saveModifiedArtFiles();
 static std::string moduleDirectory();
+static bool fileExistsA(const char* path);
+static std::string pathDirectory(const std::string& path);
+static std::string pathJoin(const std::string& dir, const std::string& name);
 static void moveCtl(HWND h, int x, int y, int w, int ht);
 
 // -----------------------------------------------------------------------------
@@ -888,7 +1445,9 @@ static void setStatus(const char* fmt, ...)
 
 static void updateTitle()
 {
-    std::string title = "BuildX - ";
+    std::string title = "BuildX (";
+    title += gameProfileName(g.game);
+    title += ") - ";
     title += g.boardPath.empty() ? "newboard.map" : g.boardPath;
     if (g.dirty || g.artDirty) title += " *";
     if (g.main) SetWindowTextA(g.main, title.c_str());
@@ -973,7 +1532,7 @@ static HMENU makeMainMenu()
     HMENU file = CreatePopupMenu();
     appendDarkMenuItem(file, ids::M_FILE_NEW, "&New\tCtrl+N");
     appendDarkMenuItem(file, ids::M_FILE_OPEN, "&Open...\tCtrl+O");
-    appendDarkMenuItem(file, ids::M_FILE_OPEN_GRP, "Open From &GRP...");
+    appendDarkMenuItem(file, ids::M_FILE_OPEN_GRP, "Open From &Archive...");
     appendDarkSeparator(file);
     appendDarkMenuItem(file, ids::M_FILE_SAVE, "&Save\tCtrl+S");
     appendDarkMenuItem(file, ids::M_FILE_SAVE_AS, "Save &As...");
@@ -1033,6 +1592,10 @@ static HMENU makeMainMenu()
     appendDarkMenuItem(tools, ids::M_TOOLS_SHADE_DOWN, "Shade Brighter\t+");
     appendDarkMenuItem(tools, ids::M_TOOLS_Z_UP, "Raise Z\tPgUp");
     appendDarkMenuItem(tools, ids::M_TOOLS_Z_DOWN, "Lower Z\tPgDn");
+    appendDarkSeparator(tools);
+    appendDarkMenuItem(tools, ids::M_BLOOD_SPRITE_PRESET, "Blood: Apply Sprite Preset...");
+    appendDarkMenuItem(tools, ids::M_BLOOD_FIXUP_SELECTION, "Blood: Normalize Selection");
+    appendDarkMenuItem(tools, ids::M_BLOOD_FIXUP_MAP, "Blood: Normalize All Sprites");
     applyDarkMenuInfo(tools, false);
     appendDarkPopupMenu(menu, tools, "&Tools");
 
@@ -1320,6 +1883,132 @@ static bool chooseStringIndex(const char* title, const char* label, const std::v
     return st.ok;
 }
 
+
+// -----------------------------------------------------------------------------
+// Startup game selector.
+// -----------------------------------------------------------------------------
+struct GameSelectState
+{
+    bool done = false;
+    bool ok = false;
+    GameProfile selected = GameProfile::Duke3D;
+    HWND dukeButton = nullptr;
+    HWND shadowButton = nullptr;
+    HWND bloodButton = nullptr;
+};
+
+static void finishGameSelect(HWND hwnd, GameSelectState* st, bool ok, GameProfile profile)
+{
+    if (!st) return;
+    st->ok = ok;
+    if (ok) st->selected = profile;
+    st->done = true;
+    DestroyWindow(hwnd);
+}
+
+static LRESULT CALLBACK GameSelectProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
+{
+    GameSelectState* st = reinterpret_cast<GameSelectState*>(GetWindowLongPtrA(hwnd, GWLP_USERDATA));
+    switch (msg)
+    {
+    case WM_CREATE:
+    {
+        st = reinterpret_cast<GameSelectState*>(reinterpret_cast<CREATESTRUCTA*>(lp)->lpCreateParams);
+        SetWindowLongPtrA(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(st));
+        enableDarkTitleBar(hwnd);
+
+        CreateWindowA("STATIC", "Choose the BUILD game profile for this editing session.", WS_CHILD | WS_VISIBLE | SS_LEFT,
+            18, 16, 438, 22, hwnd, nullptr, g.inst, nullptr);
+        CreateWindowA("STATIC", "Shadow Warrior is visible but disabled until its tags and resource rules are added.", WS_CHILD | WS_VISIBLE | SS_LEFT,
+            18, 42, 438, 22, hwnd, nullptr, g.inst, nullptr);
+
+        st->dukeButton = CreateWindowA("BUTTON", "Duke Nukem 3D", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_DEFPUSHBUTTON,
+            18, 78, 438, 42, hwnd, reinterpret_cast<HMENU>(1), g.inst, nullptr);
+        st->shadowButton = CreateWindowA("BUTTON", "Shadow Warrior  (coming soon)", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
+            18, 132, 438, 42, hwnd, reinterpret_cast<HMENU>(2), g.inst, nullptr);
+        st->bloodButton = CreateWindowA("BUTTON", "Blood", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
+            18, 186, 438, 42, hwnd, reinterpret_cast<HMENU>(3), g.inst, nullptr);
+        EnableWindow(st->shadowButton, FALSE);
+        SetFocus(st->dukeButton);
+        return 0;
+    }
+    case WM_CTLCOLORSTATIC:
+    case WM_CTLCOLOREDIT:
+    case WM_CTLCOLORLISTBOX:
+    case WM_CTLCOLORBTN:
+        return darkCtlColor(msg, wp);
+    case WM_ERASEBKGND:
+    {
+        HDC hdc = reinterpret_cast<HDC>(wp);
+        RECT rc{};
+        GetClientRect(hwnd, &rc);
+        fillRectColor(hdc, rc, theme::PanelBg);
+        return 1;
+    }
+    case WM_DRAWITEM:
+        drawDarkButton(reinterpret_cast<DRAWITEMSTRUCT*>(lp));
+        return TRUE;
+    case WM_COMMAND:
+        switch (LOWORD(wp))
+        {
+        case 1: finishGameSelect(hwnd, st, true, GameProfile::Duke3D); return 0;
+        case 3: finishGameSelect(hwnd, st, true, GameProfile::Blood); return 0;
+        case IDCANCEL: finishGameSelect(hwnd, st, false, GameProfile::Duke3D); return 0;
+        }
+        break;
+    case WM_KEYDOWN:
+        if (wp == VK_ESCAPE) { finishGameSelect(hwnd, st, false, GameProfile::Duke3D); return 0; }
+        if (wp == 'B') { finishGameSelect(hwnd, st, true, GameProfile::Blood); return 0; }
+        if (wp == 'D') { finishGameSelect(hwnd, st, true, GameProfile::Duke3D); return 0; }
+        break;
+    case WM_CLOSE:
+        finishGameSelect(hwnd, st, false, GameProfile::Duke3D);
+        return 0;
+    }
+    return DefWindowProcA(hwnd, msg, wp, lp);
+}
+
+static bool showGameSelectScreen()
+{
+    static bool registered = false;
+    if (!registered)
+    {
+        WNDCLASSA wc{};
+        wc.lpfnWndProc = GameSelectProc;
+        wc.hInstance = g.inst;
+        wc.lpszClassName = "BuildEditorGameSelect";
+        wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+        wc.hbrBackground = themePanelBrush();
+        RegisterClassA(&wc);
+        registered = true;
+    }
+
+    GameSelectState st;
+    const int w = 480;
+    const int h = 280;
+    const int x = max(0, (GetSystemMetrics(SM_CXSCREEN) - w) / 2);
+    const int y = max(0, (GetSystemMetrics(SM_CYSCREEN) - h) / 2);
+    HWND hwnd = CreateWindowExA(WS_EX_DLGMODALFRAME, "BuildEditorGameSelect", "BuildX Game Profile",
+        WS_CAPTION | WS_SYSMENU | WS_POPUP, x, y, w, h, nullptr, nullptr, g.inst, &st);
+    if (!hwnd) return false;
+
+    ShowWindow(hwnd, SW_SHOW);
+    MSG msg{};
+    while (!st.done && GetMessageA(&msg, nullptr, 0, 0) > 0)
+    {
+        if (!IsDialogMessageA(hwnd, &msg))
+        {
+            TranslateMessage(&msg);
+            DispatchMessageA(&msg);
+        }
+    }
+
+    if (st.ok)
+        g.game = st.selected;
+    return st.ok;
+}
+
+
 // -----------------------------------------------------------------------------
 // BUILD map editing helpers.
 // -----------------------------------------------------------------------------
@@ -1543,6 +2232,318 @@ static void initNewMap()
     rebuildSectorLinks();
 }
 
+
+// -----------------------------------------------------------------------------
+// Blood BLM map loader.
+//
+// Duke/BUILD maps are raw version-7 BUILD maps. Blood maps are BLM files with a
+// small Blood header, optional XOR encryption, and XSECTOR/XWALL/XSPRITE data
+// blocks after objects whose extra field is non-zero. This loader imports the
+// base BUILD geometry/sprites so Blood maps open in the editor even before the
+// full Blood dbSaveMap/dbLoadMap backend is ported.
+// -----------------------------------------------------------------------------
+static std::uint16_t bloodReadU16(const unsigned char* p)
+{
+    return static_cast<std::uint16_t>(p[0]) |
+        (static_cast<std::uint16_t>(p[1]) << 8);
+}
+
+static std::int16_t bloodReadI16(const unsigned char* p)
+{
+    return static_cast<std::int16_t>(bloodReadU16(p));
+}
+
+static std::uint32_t bloodReadU32(const unsigned char* p)
+{
+    return static_cast<std::uint32_t>(p[0]) |
+        (static_cast<std::uint32_t>(p[1]) << 8) |
+        (static_cast<std::uint32_t>(p[2]) << 16) |
+        (static_cast<std::uint32_t>(p[3]) << 24);
+}
+
+static std::int32_t bloodReadI32(const unsigned char* p)
+{
+    return static_cast<std::int32_t>(bloodReadU32(p));
+}
+
+static bool bloodReadWholeFile(const char* path, std::vector<unsigned char>& bytes)
+{
+    bytes.clear();
+    FILE* f = nullptr;
+    if (!path || !path[0] || fopen_s(&f, path, "rb") != 0 || !f) return false;
+    std::fseek(f, 0, SEEK_END);
+    const long len = std::ftell(f);
+    std::fseek(f, 0, SEEK_SET);
+    if (len <= 0)
+    {
+        std::fclose(f);
+        return false;
+    }
+    bytes.resize(static_cast<size_t>(len));
+    const bool ok = std::fread(bytes.data(), 1, bytes.size(), f) == bytes.size();
+    std::fclose(f);
+    return ok;
+}
+
+static void bloodCryptBytes(unsigned char* data, size_t bytes, int key)
+{
+    if (!data || bytes == 0) return;
+    int nKey = key;
+    for (size_t i = 0; i < bytes; ++i)
+        data[i] = static_cast<unsigned char>(data[i] ^ static_cast<unsigned char>(nKey++));
+}
+
+struct BloodMapHeaderLite
+{
+    long px = 32768;
+    long py = 32768;
+    long pz = 0;
+    short ang = 1536;
+    short sect = -1;
+    short skyBits = 0;
+    long vis = 0;
+    long songId = 0;
+    char parallaxType = 0;
+    long mapRev = 0;
+    std::uint16_t numSectors = 0;
+    std::uint16_t numWalls = 0;
+    std::uint16_t numSprites = 0;
+};
+
+static BloodMapHeaderLite bloodParseMapHeader(const std::vector<unsigned char>& raw)
+{
+    BloodMapHeaderLite h;
+    if (raw.size() < 37) return h;
+    h.px = bloodReadI32(raw.data() + 0);
+    h.py = bloodReadI32(raw.data() + 4);
+    h.pz = bloodReadI32(raw.data() + 8);
+    h.ang = bloodReadI16(raw.data() + 12);
+    h.sect = bloodReadI16(raw.data() + 14);
+    h.skyBits = bloodReadI16(raw.data() + 16);
+    h.vis = bloodReadI32(raw.data() + 18);
+    h.songId = bloodReadI32(raw.data() + 22);
+    h.parallaxType = static_cast<char>(raw[26]);
+    h.mapRev = bloodReadI32(raw.data() + 27);
+    h.numSectors = bloodReadU16(raw.data() + 31);
+    h.numWalls = bloodReadU16(raw.data() + 33);
+    h.numSprites = bloodReadU16(raw.data() + 35);
+    return h;
+}
+
+static bool bloodHeaderLooksValid(const BloodMapHeaderLite& h)
+{
+    if (h.numSectors == 0 || h.numSectors > MAXSECTORS) return false;
+    if (h.numWalls == 0 || h.numWalls > MAXWALLS) return false;
+    if (h.numSprites > MAXSPRITES) return false;
+    if (h.skyBits < 0 || h.skyBits > 12) return false;
+    if ((1 << h.skyBits) > MAXPSKYTILES) return false;
+    if ((h.ang & ~2047) != 0) return false;
+    return true;
+}
+
+static int bloodSafeXDataSize(int value, int fallback)
+{
+    if (value < 0 || value > 4096) return fallback;
+    return value;
+}
+
+static void bloodSanitizeLoadedMap()
+{
+    for (short i = 0; i < numsectors; ++i)
+    {
+        if (sector[i].wallptr < 0 || sector[i].wallptr >= numwalls)
+        {
+            sector[i].wallptr = 0;
+            sector[i].wallnum = 0;
+        }
+        if (sector[i].wallnum < 0 || sector[i].wallptr + sector[i].wallnum > numwalls)
+            sector[i].wallnum = static_cast<short>(max(0, numwalls - sector[i].wallptr));
+    }
+
+    for (short i = 0; i < numwalls; ++i)
+    {
+        if (wall[i].point2 < 0 || wall[i].point2 >= numwalls) wall[i].point2 = i;
+        if (wall[i].nextwall < 0 || wall[i].nextwall >= numwalls) wall[i].nextwall = -1;
+        if (wall[i].nextsector < 0 || wall[i].nextsector >= numsectors) wall[i].nextsector = -1;
+        if (wall[i].picnum < 0 || wall[i].picnum >= MAXTILES) wall[i].picnum = 0;
+        if (wall[i].overpicnum < 0 || wall[i].overpicnum >= MAXTILES) wall[i].overpicnum = 0;
+    }
+
+    for (short i = 0; i < MAXSPRITES; ++i)
+    {
+        if (sprite[i].sectnum >= numsectors && sprite[i].sectnum != MAXSECTORS) sprite[i].sectnum = MAXSECTORS;
+        if (sprite[i].statnum >= MAXSTATUS && sprite[i].statnum != MAXSTATUS) sprite[i].statnum = MAXSTATUS;
+        if (sprite[i].picnum < 0 || sprite[i].picnum >= MAXTILES) sprite[i].picnum = 0;
+    }
+}
+
+static bool loadBloodMapAsBuild(const char* path, long* daposx, long* daposy, long* daposz, short* daang, short* dacursectnum)
+{
+    std::vector<unsigned char> file;
+    if (!bloodReadWholeFile(path, file)) return false;
+    if (file.size() < 6 + 37 || std::memcmp(file.data(), "BLM\x1a", 4) != 0) return false;
+
+    const std::uint16_t version = bloodReadU16(file.data() + 4);
+    const std::uint16_t versionMajor = static_cast<std::uint16_t>(version & 0xff00);
+    if (versionMajor != 0x0600 && versionMajor != 0x0700) return false;
+    const bool encryptedObjects = (versionMajor == 0x0700);
+
+    constexpr int kBloodMapHeaderBytes = 37;
+    constexpr int kBloodHeader2Bytes = 128;
+    constexpr int kMattKey = 0x7474614d; // bytes: 'M','a','t','t'
+    constexpr int kLegacyXSectorBytes = 60;
+    constexpr int kLegacyXWallBytes = 24;
+    constexpr int kLegacyXSpriteBytes = 56;
+
+    size_t pos = 6;
+    std::vector<unsigned char> header(file.begin() + pos, file.begin() + pos + kBloodMapHeaderBytes);
+    pos += kBloodMapHeaderBytes;
+
+    BloodMapHeaderLite mh = bloodParseMapHeader(header);
+    if (!bloodHeaderLooksValid(mh))
+    {
+        std::vector<unsigned char> decoded = header;
+        bloodCryptBytes(decoded.data(), decoded.size(), kMattKey);
+        BloodMapHeaderLite decodedHeader = bloodParseMapHeader(decoded);
+        if (!bloodHeaderLooksValid(decodedHeader)) return false;
+        header.swap(decoded);
+        mh = decodedHeader;
+    }
+
+    int xSpriteBytes = kLegacyXSpriteBytes;
+    int xWallBytes = kLegacyXWallBytes;
+    int xSectorBytes = kLegacyXSectorBytes;
+    if (encryptedObjects)
+    {
+        if (pos + kBloodHeader2Bytes > file.size()) return false;
+        std::vector<unsigned char> header2(file.begin() + pos, file.begin() + pos + kBloodHeader2Bytes);
+        pos += kBloodHeader2Bytes;
+        bloodCryptBytes(header2.data(), header2.size(), mh.numWalls);
+        xSpriteBytes = bloodSafeXDataSize(static_cast<int>(bloodReadI32(header2.data() + 0x40)), kLegacyXSpriteBytes);
+        xWallBytes = bloodSafeXDataSize(static_cast<int>(bloodReadI32(header2.data() + 0x44)), kLegacyXWallBytes);
+        xSectorBytes = bloodSafeXDataSize(static_cast<int>(bloodReadI32(header2.data() + 0x48)), kLegacyXSectorBytes);
+    }
+
+    const int skyCount = 1 << mh.skyBits;
+    if (skyCount < 0 || skyCount > MAXPSKYTILES) return false;
+    if (pos + static_cast<size_t>(skyCount) * 2 > file.size()) return false;
+    std::vector<unsigned char> skyBytes(file.begin() + pos, file.begin() + pos + static_cast<size_t>(skyCount) * 2);
+    pos += static_cast<size_t>(skyCount) * 2;
+    if (encryptedObjects) bloodCryptBytes(skyBytes.data(), skyBytes.size(), skyCount * 2);
+
+    std::memset(sector, 0, sizeof(sector));
+    std::memset(wall, 0, sizeof(wall));
+    std::memset(sprite, 0, sizeof(sprite));
+    initspritelists();
+
+    numsectors = static_cast<short>(mh.numSectors);
+    numwalls = static_cast<short>(mh.numWalls);
+    pskybits = mh.skyBits;
+    visibility = mh.vis;
+    parallaxtype = mh.parallaxType;
+    for (int i = 0; i < MAXPSKYTILES; ++i) pskyoff[i] = 0;
+    for (int i = 0; i < skyCount; ++i) pskyoff[i] = bloodReadI16(skyBytes.data() + i * 2);
+
+    const int sectorCryptKey = static_cast<int>(mh.mapRev * static_cast<long>(sizeof(sectortype)));
+    const int wallCryptKey = sectorCryptKey | kMattKey;
+    const int spriteCryptKey = static_cast<int>(mh.mapRev * static_cast<long>(sizeof(spritetype))) | kMattKey;
+
+    for (short i = 0; i < numsectors; ++i)
+    {
+        if (pos + sizeof(sectortype) > file.size()) return false;
+        std::vector<unsigned char> raw(file.begin() + pos, file.begin() + pos + sizeof(sectortype));
+        pos += sizeof(sectortype);
+        if (encryptedObjects) bloodCryptBytes(raw.data(), raw.size(), sectorCryptKey);
+        std::memcpy(&sector[i], raw.data(), sizeof(sectortype));
+        if (sector[i].extra > 0)
+        {
+            if (pos + static_cast<size_t>(xSectorBytes) > file.size()) return false;
+            pos += static_cast<size_t>(xSectorBytes);
+        }
+    }
+
+    for (short i = 0; i < numwalls; ++i)
+    {
+        if (pos + sizeof(walltype) > file.size()) return false;
+        std::vector<unsigned char> raw(file.begin() + pos, file.begin() + pos + sizeof(walltype));
+        pos += sizeof(walltype);
+        if (encryptedObjects) bloodCryptBytes(raw.data(), raw.size(), wallCryptKey);
+        std::memcpy(&wall[i], raw.data(), sizeof(walltype));
+        if (wall[i].extra > 0)
+        {
+            if (pos + static_cast<size_t>(xWallBytes) > file.size()) return false;
+            pos += static_cast<size_t>(xWallBytes);
+        }
+    }
+
+    initspritelists();
+    for (std::uint16_t i = 0; i < mh.numSprites; ++i)
+    {
+        if (pos + sizeof(spritetype) > file.size()) return false;
+        spritetype sp{};
+        std::vector<unsigned char> raw(file.begin() + pos, file.begin() + pos + sizeof(spritetype));
+        pos += sizeof(spritetype);
+        if (encryptedObjects) bloodCryptBytes(raw.data(), raw.size(), spriteCryptKey);
+        std::memcpy(&sp, raw.data(), sizeof(spritetype));
+        if (sp.extra > 0)
+        {
+            if (pos + static_cast<size_t>(xSpriteBytes) > file.size()) return false;
+            pos += static_cast<size_t>(xSpriteBytes);
+        }
+
+        if (sp.sectnum < 0 || sp.sectnum >= numsectors || sp.statnum < 0 || sp.statnum >= MAXSTATUS)
+            continue;
+
+        const short slot = insertsprite(sp.sectnum, sp.statnum);
+        if (slot >= 0) sprite[slot] = sp;
+    }
+
+    bloodSanitizeLoadedMap();
+
+    if (daposx) *daposx = mh.px;
+    if (daposy) *daposy = mh.py;
+    if (daposz) *daposz = mh.pz;
+    if (daang) *daang = static_cast<short>(mh.ang & 2047);
+    if (dacursectnum)
+    {
+        *dacursectnum = mh.sect;
+        if (*dacursectnum < 0 || *dacursectnum >= numsectors)
+            updatesector(mh.px, mh.py, dacursectnum);
+    }
+
+    return true;
+}
+
+
+static void tryMountBloodResourcesNearMap(const char* mapPath)
+{
+    if (!isBloodMode() || !mapPath || !mapPath[0]) return;
+    if (g.bloodRffPrepared && !g.bloodExtractPath.empty())
+    {
+        reloadCurrentGamePalette();
+        return;
+    }
+
+    const std::string mapDir = pathDirectory(mapPath);
+    const std::string candidates[] = {
+        pathJoin(mapDir, "BLOOD.RFF"),
+        pathJoin(mapDir, "blood.rff"),
+        pathJoin(moduleDirectory(), "BLOOD.RFF"),
+        pathJoin(moduleDirectory(), "blood.rff"),
+        "BLOOD.RFF",
+        "blood.rff",
+    };
+
+    for (const std::string& rff : candidates)
+    {
+        if (rff.empty() || !fileExistsA(rff.c_str())) continue;
+        if (!prepareBloodRffCache(rff)) continue;
+        reloadCurrentGamePalette();
+        loadBloodArtSetFromCurrentData();
+        return;
+    }
+}
+
 static bool loadMapFile(const char* path)
 {
     if (!path || !path[0]) return false;
@@ -1550,11 +2551,30 @@ static bool loadMapFile(const char* path)
     std::strncpy(filename, path, sizeof(filename) - 1);
     filename[sizeof(filename) - 1] = 0;
 
+    tryMountBloodResourcesNearMap(filename);
+
     long px = 32768, py = 32768, pz = 0;
     short a = 1536, s = -1;
-    if (loadboard(filename, &px, &py, &pz, &a, &s) < 0)
+    bool loaded = false;
+
+    if (isBloodMode())
     {
-        MessageBoxA(g.main, "Could not load that map. A new square map was created instead.", "Open map", MB_ICONWARNING);
+        // Blood maps are BLM files, not raw Duke/BUILD mapversion-7 files.
+        // Try the Blood loader first; fall back to the classic loader so the
+        // Blood profile can still open test BUILD maps.
+        loaded = loadBloodMapAsBuild(filename, &px, &py, &pz, &a, &s);
+    }
+
+    if (!loaded)
+        loaded = loadboard(filename, &px, &py, &pz, &a, &s) >= 0;
+
+    if (!loaded)
+    {
+        MessageBoxA(g.main,
+            isBloodMode()
+            ? "Could not load that map. Tried Blood BLM and classic BUILD map loaders; a new square map was created instead."
+            : "Could not load that map. A new square map was created instead.",
+            "Open map", MB_ICONWARNING);
         initNewMap();
         return false;
     }
@@ -1571,8 +2591,9 @@ static bool loadMapFile(const char* path)
     g.sel.clear();
     syncEngineSearchGlobals(g.sel);
     rebuildSectorLinks();
+    if (isBloodMode()) bloodNormalizeMapForBlood(true);
     setDirty(false);
-    setStatus("Loaded %s", path);
+    setStatus(isBloodMode() ? "Loaded Blood map %s" : "Loaded %s", path);
     refreshAllViews();
     return true;
 }
@@ -1581,6 +2602,7 @@ static bool saveMapFile(const char* path)
 {
     if (!path || !path[0]) return false;
     updatesector(g.startx, g.starty, &g.startsect);
+    if (isBloodMode()) bloodNormalizeMapForBlood(true);
     char filename[MAX_PATH];
     std::strncpy(filename, path, sizeof(filename) - 1);
     filename[sizeof(filename) - 1] = 0;
@@ -1603,6 +2625,11 @@ struct GrpMapEntry
     std::string name;
     std::uint32_t offset = 0;
     std::uint32_t size = 0;
+    std::uint32_t packedSize = 0;
+    std::uint32_t id = 0;
+    std::uint16_t archiveVersion = 0;
+    std::uint8_t flags = 0;
+    bool fromRff = false;
 };
 
 static std::uint32_t readLe32(const unsigned char b[4])
@@ -1611,6 +2638,12 @@ static std::uint32_t readLe32(const unsigned char b[4])
         (static_cast<std::uint32_t>(b[1]) << 8) |
         (static_cast<std::uint32_t>(b[2]) << 16) |
         (static_cast<std::uint32_t>(b[3]) << 24);
+}
+
+static std::uint16_t readLe16(const unsigned char b[2])
+{
+    return static_cast<std::uint16_t>(b[0]) |
+        static_cast<std::uint16_t>(static_cast<std::uint16_t>(b[1]) << 8);
 }
 
 static bool readExact(FILE* f, void* dst, size_t bytes)
@@ -1697,7 +2730,176 @@ static std::string sanitizeFileName(std::string s)
     return s;
 }
 
-static bool readGrpEntries(const char* grpPath, std::vector<GrpMapEntry>& entries)
+static std::string trimFixedArchiveString(const char* raw, size_t len)
+{
+    size_t n = 0;
+    while (n < len && raw[n] != 0) ++n;
+    while (n > 0 && (raw[n - 1] == ' ' || raw[n - 1] == '\t')) --n;
+    return std::string(raw, raw + n);
+}
+
+static bool isRffSignature(const unsigned char header[4])
+{
+    return header && header[0] == 'R' && header[1] == 'F' && header[2] == 'F' && header[3] == 0x1a;
+}
+
+static bool isRffArchivePath(const char* path)
+{
+    if (!path || !path[0]) return false;
+    FILE* f = nullptr;
+    if (fopen_s(&f, path, "rb") != 0 || !f) return false;
+    unsigned char header[4] = {};
+    const bool ok = readExact(f, header, sizeof(header)) && isRffSignature(header);
+    std::fclose(f);
+    return ok;
+}
+
+static bool isGrpArchivePath(const char* path)
+{
+    if (!path || !path[0]) return false;
+    FILE* f = nullptr;
+    if (fopen_s(&f, path, "rb") != 0 || !f) return false;
+    char signature[12] = {};
+    const bool ok = readExact(f, signature, sizeof(signature)) && std::memcmp(signature, "KenSilverman", 12) == 0;
+    std::fclose(f);
+    return ok;
+}
+
+static bool isWritableGrpArchivePath(const std::string& path)
+{
+    return !path.empty() && isGrpArchivePath(path.c_str()) && !isRffArchivePath(path.c_str());
+}
+
+static bool archiveEntryNameEquals(const std::string& a, const char* b)
+{
+    return upperAscii(a) == upperAscii(b ? b : "");
+}
+
+static bool readRffEntries(const char* rffPath, std::vector<GrpMapEntry>& entries)
+{
+    entries.clear();
+    if (!rffPath || !rffPath[0]) return false;
+
+    FILE* f = nullptr;
+    if (fopen_s(&f, rffPath, "rb") != 0 || !f) return false;
+
+    unsigned char header[32] = {};
+    if (!readExact(f, header, sizeof(header)) || !isRffSignature(header))
+    {
+        std::fclose(f);
+        return false;
+    }
+
+    const std::uint16_t version = readLe16(header + 4);
+    const std::uint32_t dictOffset = readLe32(header + 8);
+    const std::uint32_t dictEntries = readLe32(header + 12);
+    const std::uint64_t fatBytes = static_cast<std::uint64_t>(dictEntries) * 48ull;
+
+    if (dictEntries > 1000000u || fatBytes > 0xffffffffull)
+    {
+        std::fclose(f);
+        return false;
+    }
+
+    if (std::fseek(f, 0, SEEK_END) != 0)
+    {
+        std::fclose(f);
+        return false;
+    }
+    const long fileEnd = std::ftell(f);
+    if (fileEnd < 0 || static_cast<std::uint64_t>(dictOffset) + fatBytes > static_cast<std::uint64_t>(fileEnd))
+    {
+        std::fclose(f);
+        return false;
+    }
+
+    if (std::fseek(f, static_cast<long>(dictOffset), SEEK_SET) != 0)
+    {
+        std::fclose(f);
+        return false;
+    }
+
+    std::vector<unsigned char> fat(static_cast<size_t>(fatBytes));
+    if (!fat.empty() && std::fread(fat.data(), 1, fat.size(), f) != fat.size())
+    {
+        std::fclose(f);
+        return false;
+    }
+    std::fclose(f);
+
+    if (version >= 0x0300)
+    {
+        std::uint8_t key = static_cast<std::uint8_t>(dictOffset & 0xff);
+        for (size_t i = 0; i < fat.size(); ++i)
+        {
+            if (version == 0x0300)
+            {
+                fat[i] = static_cast<unsigned char>(fat[i] ^ (key >> 1));
+                ++key;
+            }
+            else
+            {
+                fat[i] = static_cast<unsigned char>(fat[i] ^ key);
+                key = static_cast<std::uint8_t>(key + (i & 1));
+            }
+        }
+    }
+
+    entries.reserve(dictEntries);
+    for (std::uint32_t i = 0; i < dictEntries; ++i)
+    {
+        const unsigned char* e = fat.data() + static_cast<size_t>(i) * 48u;
+        const std::uint32_t offset = readLe32(e + 16);
+        const std::uint32_t size = readLe32(e + 20);
+        const std::uint32_t packedSize = readLe32(e + 24);
+        const std::uint8_t flags = e[32];
+        const std::string ext = trimFixedArchiveString(reinterpret_cast<const char*>(e + 33), 3);
+        const std::string stem = trimFixedArchiveString(reinterpret_cast<const char*>(e + 36), 8);
+        const std::uint32_t id = readLe32(e + 44);
+
+        GrpMapEntry ge;
+        ge.offset = offset;
+        ge.size = size;
+        ge.packedSize = packedSize;
+        ge.id = id;
+        ge.archiveVersion = version;
+        ge.flags = flags;
+        ge.fromRff = true;
+
+        if ((flags & 0x01) && stem.empty())
+        {
+            char idName[64] = {};
+            if (!ext.empty()) std::snprintf(idName, sizeof(idName), "%u.%s", id, ext.c_str());
+            else std::snprintf(idName, sizeof(idName), "%u", id);
+            ge.name = idName;
+        }
+        else if (!ext.empty())
+        {
+            ge.name = stem + "." + ext;
+        }
+        else
+        {
+            ge.name = stem;
+        }
+
+        if (ge.name.empty())
+        {
+            char fallback[64] = {};
+            std::snprintf(fallback, sizeof(fallback), "RFF_%u.BIN", i);
+            ge.name = fallback;
+        }
+
+        entries.push_back(ge);
+    }
+
+    std::sort(entries.begin(), entries.end(), [](const GrpMapEntry& a, const GrpMapEntry& b)
+        {
+            return upperAscii(a.name) < upperAscii(b.name);
+        });
+    return true;
+}
+
+static bool readKenSilvermanGrpEntries(const char* grpPath, std::vector<GrpMapEntry>& entries)
 {
     entries.clear();
     if (!grpPath || !grpPath[0]) return false;
@@ -1737,6 +2939,7 @@ static bool readGrpEntries(const char* grpPath, std::vector<GrpMapEntry>& entrie
             e.name.assign(rawName, rawName + nameLen);
             e.offset = static_cast<std::uint32_t>(dataOffset);
             e.size = size;
+            e.fromRff = false;
             entries.push_back(e);
         }
         dataOffset += size;
@@ -1744,6 +2947,13 @@ static bool readGrpEntries(const char* grpPath, std::vector<GrpMapEntry>& entrie
 
     std::fclose(f);
     return true;
+}
+
+static bool readGrpEntries(const char* grpPath, std::vector<GrpMapEntry>& entries)
+{
+    entries.clear();
+    if (readRffEntries(grpPath, entries)) return true;
+    return readKenSilvermanGrpEntries(grpPath, entries);
 }
 
 static bool findGrpEntry(const char* grpPath, const char* wantedName, GrpMapEntry& out)
@@ -1762,9 +2972,30 @@ static bool findGrpEntry(const char* grpPath, const char* wantedName, GrpMapEntr
     return false;
 }
 
+static bool readRffExternalEntryBytes(const char* rffPath, const GrpMapEntry& entry, std::vector<unsigned char>& data)
+{
+    data.clear();
+    const std::string path = pathJoin(pathDirectory(rffPath ? rffPath : "."), entry.name);
+    FILE* f = nullptr;
+    if (fopen_s(&f, path.c_str(), "rb") != 0 || !f) return false;
+    data.resize(entry.size);
+    const bool ok = entry.size == 0 || std::fread(data.data(), 1, entry.size, f) == entry.size;
+    std::fclose(f);
+    if (!ok) data.clear();
+    return ok;
+}
+
 static bool readGrpEntryBytes(const char* grpPath, const GrpMapEntry& entry, std::vector<unsigned char>& data)
 {
     data.clear();
+    if (!grpPath || !grpPath[0]) return false;
+
+    if (entry.fromRff || isRffArchivePath(grpPath))
+    {
+        if (entry.flags & 0x02)
+            return readRffExternalEntryBytes(grpPath, entry, data);
+    }
+
     FILE* f = nullptr;
     if (fopen_s(&f, grpPath, "rb") != 0 || !f) return false;
     if (std::fseek(f, static_cast<long>(entry.offset), SEEK_SET) != 0)
@@ -1775,6 +3006,15 @@ static bool readGrpEntryBytes(const char* grpPath, const GrpMapEntry& entry, std
     data.resize(entry.size);
     bool ok = entry.size == 0 || std::fread(data.data(), 1, entry.size, f) == entry.size;
     std::fclose(f);
+
+    if (ok && (entry.fromRff || isRffArchivePath(grpPath)) && (entry.flags & 0x10))
+    {
+        const size_t n = std::min<size_t>(256, data.size());
+        for (size_t i = 0; i < n; ++i)
+            data[i] = static_cast<unsigned char>(data[i] ^ (i >> 1));
+    }
+
+    if (!ok) data.clear();
     return ok;
 }
 
@@ -1785,8 +3025,59 @@ static bool loadPaletteFromGrp(const char* grpPath)
     std::vector<unsigned char> bytes;
     if (!readGrpEntryBytes(grpPath, palEntry, bytes) || bytes.size() < 768) return false;
     for (int i = 0; i < 768; ++i) palette[i] = static_cast<char>(bytes[static_cast<size_t>(i)]);
+    FlushTextureCache();
     return true;
 }
+
+
+static bool loadPaletteFromLooseFile(const char* path)
+{
+    if (!path || !path[0]) return false;
+    FILE* f = nullptr;
+    if (fopen_s(&f, path, "rb") != 0 || !f) return false;
+    unsigned char bytes[768] = {};
+    const bool ok = std::fread(bytes, 1, sizeof(bytes), f) == sizeof(bytes);
+    std::fclose(f);
+    if (!ok) return false;
+    for (int i = 0; i < 768; ++i) palette[i] = static_cast<char>(bytes[i]);
+    FlushTextureCache();
+    return true;
+}
+
+static bool loadBloodPaletteFromFolder(const std::string& folder)
+{
+    const std::string pal1 = pathJoin(folder.empty() ? "." : folder, "PALETTE.DAT");
+    const std::string pal2 = pathJoin(folder.empty() ? "." : folder, "palette.dat");
+    if (loadPaletteFromLooseFile(pal1.c_str())) return true;
+    if (loadPaletteFromLooseFile(pal2.c_str())) return true;
+    return false;
+}
+
+static bool reloadCurrentGamePalette()
+{
+    if (isBloodMode())
+    {
+        if (!g.bloodExtractPath.empty() && loadBloodPaletteFromFolder(g.bloodExtractPath))
+            return true;
+        if (!g.bloodRffPath.empty() && fileExistsA(g.bloodRffPath.c_str()) && loadPaletteFromGrp(g.bloodRffPath.c_str()))
+            return true;
+        if (!g.dukeGrpPath.empty() && fileExistsA(g.dukeGrpPath.c_str()))
+        {
+            if (isRffArchivePath(g.dukeGrpPath.c_str()) && loadPaletteFromGrp(g.dukeGrpPath.c_str()))
+            {
+                g.bloodRffPath = g.dukeGrpPath;
+                return true;
+            }
+            return loadBloodPaletteFromFolder(pathDirectory(g.dukeGrpPath));
+        }
+        return loadBloodPaletteFromFolder(".");
+    }
+
+    if (!g.dukeGrpPath.empty() && fileExistsA(g.dukeGrpPath.c_str()))
+        return loadPaletteFromGrp(g.dukeGrpPath.c_str());
+    return false;
+}
+
 
 static bool readGrpMapEntries(const char* grpPath, std::vector<GrpMapEntry>& maps)
 {
@@ -1811,49 +3102,21 @@ static bool extractGrpEntryToTemp(const char* grpPath, const GrpMapEntry& entry,
     if (!GetTempPathA(sizeof(tempDir), tempDir) || !GetTempFileNameA(tempDir, "BXM", 0, tempFile))
         return false;
 
-    HANDLE in = CreateFileA(grpPath, GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (in == INVALID_HANDLE_VALUE)
+    std::vector<unsigned char> bytes;
+    if (!readGrpEntryBytes(grpPath, entry, bytes))
     {
         DeleteFileA(tempFile);
         return false;
     }
 
-    HANDLE out = CreateFileA(tempFile, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_TEMPORARY, nullptr);
-    if (out == INVALID_HANDLE_VALUE)
+    FILE* out = nullptr;
+    if (fopen_s(&out, tempFile, "wb") != 0 || !out)
     {
-        CloseHandle(in);
         DeleteFileA(tempFile);
         return false;
     }
-
-    LARGE_INTEGER pos{};
-    pos.QuadPart = entry.offset;
-    bool ok = SetFilePointerEx(in, pos, nullptr, FILE_BEGIN) != 0;
-    std::vector<unsigned char> buffer(64 * 1024);
-    std::uint32_t remaining = entry.size;
-
-    while (ok && remaining > 0)
-    {
-        const DWORD want = static_cast<DWORD>(remaining > buffer.size() ? buffer.size() : remaining);
-        DWORD got = 0;
-        if (!ReadFile(in, buffer.data(), want, &got, nullptr) || got == 0)
-        {
-            ok = false;
-            break;
-        }
-
-        DWORD wrote = 0;
-        if (!WriteFile(out, buffer.data(), got, &wrote, nullptr) || wrote != got)
-        {
-            ok = false;
-            break;
-        }
-
-        remaining -= got;
-    }
-
-    CloseHandle(out);
-    CloseHandle(in);
+    const bool ok = bytes.empty() || std::fwrite(bytes.data(), 1, bytes.size(), out) == bytes.size();
+    std::fclose(out);
 
     if (!ok)
     {
@@ -1882,22 +3145,24 @@ static bool promptOpenMapFromGrp()
     OPENFILENAMEA ofn{};
     ofn.lStructSize = sizeof(ofn);
     ofn.hwndOwner = g.main;
-    ofn.lpstrFilter = "BUILD group files (*.grp)\0*.grp\0All files (*.*)\0*.*\0";
+    ofn.lpstrFilter = isBloodMode()
+        ? "Blood/BUILD archives (*.rff;*.grp)\0*.rff;*.grp\0All files (*.*)\0*.*\0"
+        : "BUILD group files (*.grp)\0*.grp\0All files (*.*)\0*.*\0";
     ofn.lpstrFile = grpFile;
     ofn.nMaxFile = sizeof(grpFile);
     ofn.Flags = OFN_FILEMUSTEXIST | OFN_HIDEREADONLY;
-    ofn.lpstrDefExt = "grp";
+    ofn.lpstrDefExt = isBloodMode() ? "rff" : "grp";
     if (!GetOpenFileNameA(&ofn)) return false;
 
     std::vector<GrpMapEntry> maps;
     if (!readGrpMapEntries(grpFile, maps))
     {
-        MessageBoxA(g.main, "Could not read that GRP file. Make sure it is a Ken Silverman BUILD .grp file.", "Open from GRP", MB_ICONERROR);
+        MessageBoxA(g.main, "Could not read that archive. Select a Ken Silverman .grp or Blood .rff file.", "Open from archive", MB_ICONERROR);
         return false;
     }
     if (maps.empty())
     {
-        MessageBoxA(g.main, "That GRP file does not contain any .map entries.", "Open from GRP", MB_ICONINFORMATION);
+        MessageBoxA(g.main, "That archive does not contain any .map entries.", "Open from archive", MB_ICONINFORMATION);
         return false;
     }
 
@@ -1907,14 +3172,14 @@ static bool promptOpenMapFromGrp()
         std::vector<std::string> names;
         names.reserve(maps.size());
         for (const GrpMapEntry& e : maps) names.push_back(e.name);
-        if (!chooseStringIndex("Open map from GRP", "Select a map inside the GRP:", names, choice))
+        if (!chooseStringIndex("Open map from archive", "Select a map inside the archive:", names, choice))
             return false;
     }
 
     std::string tempMap;
     if (!extractGrpEntryToTemp(grpFile, maps[choice], tempMap))
     {
-        MessageBoxA(g.main, "Could not extract that map from the GRP file.", "Open from GRP", MB_ICONERROR);
+        MessageBoxA(g.main, "Could not extract that map from the archive.", "Open from archive", MB_ICONERROR);
         return false;
     }
 
@@ -1926,7 +3191,14 @@ static bool promptOpenMapFromGrp()
     g.boardGrpPath = grpFile;
     g.dukeGrpPath = fullPathOf(grpFile);
     g.grpEditPath = g.dukeGrpPath;
-    if (g.grpExportPath.empty()) g.grpExportPath = pathJoin(pathDirectory(g.grpEditPath), "grp_export");
+    if (isBloodMode() && isRffArchivePath(g.dukeGrpPath.c_str()))
+    {
+        g.bloodDataPath = g.dukeGrpPath;
+        g.bloodRffPath = g.dukeGrpPath;
+        prepareBloodRffCache(g.bloodRffPath);
+        loadBloodArtSetFromCurrentData();
+    }
+    if (g.grpExportPath.empty()) g.grpExportPath = pathJoin(pathDirectory(g.grpEditPath), isRffArchivePath(g.grpEditPath.c_str()) ? "rff_export" : "grp_export");
     updateGrpEditPanel();
     loadPaletteFromGrp(g.dukeGrpPath.c_str());
     g.boardGrpEntry = maps[choice].name;
@@ -2475,6 +3747,179 @@ static bool selectedSpriteValid()
         sprite[g.sel.wall].sectnum >= 0 && sprite[g.sel.wall].sectnum < MAXSECTORS;
 }
 
+
+static bool selectedBuildObjectValid()
+{
+    return selectedSurfaceValid() || selectedSectorValid();
+}
+
+static int getSelectedTypeValue()
+{
+    if (!selectedBuildObjectValid()) return 0;
+    switch (g.sel.stat)
+    {
+    case SS_WALL:
+    case SS_MASKED_WALL: return wall[g.sel.wall].lotag;
+    case SS_CEILING:
+    case SS_FLOOR: return sector[g.sel.sector].lotag;
+    case SS_SPRITE: return sprite[g.sel.wall].lotag;
+    default: return selectedSectorValid() ? sector[g.sel.sector].lotag : 0;
+    }
+}
+
+static int getSelectedHitagValue()
+{
+    if (!selectedBuildObjectValid()) return 0;
+    switch (g.sel.stat)
+    {
+    case SS_WALL:
+    case SS_MASKED_WALL: return wall[g.sel.wall].hitag;
+    case SS_CEILING:
+    case SS_FLOOR: return sector[g.sel.sector].hitag;
+    case SS_SPRITE: return sprite[g.sel.wall].hitag;
+    default: return selectedSectorValid() ? sector[g.sel.sector].hitag : 0;
+    }
+}
+
+static int getSelectedExtraValue()
+{
+    if (!selectedBuildObjectValid()) return -1;
+    switch (g.sel.stat)
+    {
+    case SS_WALL:
+    case SS_MASKED_WALL: return wall[g.sel.wall].extra;
+    case SS_CEILING:
+    case SS_FLOOR: return sector[g.sel.sector].extra;
+    case SS_SPRITE: return sprite[g.sel.wall].extra;
+    default: return selectedSectorValid() ? sector[g.sel.sector].extra : -1;
+    }
+}
+
+static int getSelectedCstatValue()
+{
+    if (!selectedSurfaceValid()) return 0;
+    switch (g.sel.stat)
+    {
+    case SS_WALL:
+    case SS_MASKED_WALL: return static_cast<unsigned short>(wall[g.sel.wall].cstat);
+    case SS_CEILING: return static_cast<unsigned short>(sector[g.sel.sector].ceilingstat);
+    case SS_FLOOR: return static_cast<unsigned short>(sector[g.sel.sector].floorstat);
+    case SS_SPRITE: return static_cast<unsigned short>(sprite[g.sel.wall].cstat);
+    default: return 0;
+    }
+}
+
+static bool setSelectedTypeDirect(int value)
+{
+    if (!selectedBuildObjectValid()) return false;
+    const short v = static_cast<short>(clamp_long(value, -32768, 32767));
+    switch (g.sel.stat)
+    {
+    case SS_WALL:
+    case SS_MASKED_WALL: if (wall[g.sel.wall].lotag == v) return false; wall[g.sel.wall].lotag = v; return true;
+    case SS_CEILING:
+    case SS_FLOOR: if (sector[g.sel.sector].lotag == v) return false; sector[g.sel.sector].lotag = v; return true;
+    case SS_SPRITE: if (sprite[g.sel.wall].lotag == v) return false; sprite[g.sel.wall].lotag = v; return true;
+    default: if (selectedSectorValid() && sector[g.sel.sector].lotag != v) { sector[g.sel.sector].lotag = v; return true; } return false;
+    }
+}
+
+static bool setSelectedHitagDirect(int value)
+{
+    if (!selectedBuildObjectValid()) return false;
+    const short v = static_cast<short>(clamp_long(value, -32768, 32767));
+    switch (g.sel.stat)
+    {
+    case SS_WALL:
+    case SS_MASKED_WALL: if (wall[g.sel.wall].hitag == v) return false; wall[g.sel.wall].hitag = v; return true;
+    case SS_CEILING:
+    case SS_FLOOR: if (sector[g.sel.sector].hitag == v) return false; sector[g.sel.sector].hitag = v; return true;
+    case SS_SPRITE: if (sprite[g.sel.wall].hitag == v) return false; sprite[g.sel.wall].hitag = v; return true;
+    default: if (selectedSectorValid() && sector[g.sel.sector].hitag != v) { sector[g.sel.sector].hitag = v; return true; } return false;
+    }
+}
+
+static bool setSelectedExtraDirect(int value)
+{
+    if (!selectedBuildObjectValid()) return false;
+    const short v = static_cast<short>(clamp_long(value, -32768, 32767));
+    switch (g.sel.stat)
+    {
+    case SS_WALL:
+    case SS_MASKED_WALL: if (wall[g.sel.wall].extra == v) return false; wall[g.sel.wall].extra = v; return true;
+    case SS_CEILING:
+    case SS_FLOOR: if (sector[g.sel.sector].extra == v) return false; sector[g.sel.sector].extra = v; return true;
+    case SS_SPRITE: if (sprite[g.sel.wall].extra == v) return false; sprite[g.sel.wall].extra = v; return true;
+    default: if (selectedSectorValid() && sector[g.sel.sector].extra != v) { sector[g.sel.sector].extra = v; return true; } return false;
+    }
+}
+
+static bool setSelectedCstatDirect(int value)
+{
+    if (!selectedSurfaceValid()) return false;
+    const short v = static_cast<short>(clamp_long(value, 0, 65535));
+    switch (g.sel.stat)
+    {
+    case SS_WALL:
+    case SS_MASKED_WALL: if (wall[g.sel.wall].cstat == v) return false; wall[g.sel.wall].cstat = v; return true;
+    case SS_CEILING: if (sector[g.sel.sector].ceilingstat == v) return false; sector[g.sel.sector].ceilingstat = v; return true;
+    case SS_FLOOR: if (sector[g.sel.sector].floorstat == v) return false; sector[g.sel.sector].floorstat = v; return true;
+    case SS_SPRITE: if (sprite[g.sel.wall].cstat == v) return false; sprite[g.sel.wall].cstat = v; return true;
+    default: return false;
+    }
+}
+
+static bool setSelectedSpriteStatnumDirect(int value)
+{
+    if (!selectedSpriteValid()) return false;
+    const short v = static_cast<short>(clamp_long(value, 0, MAXSTATUS - 1));
+    if (sprite[g.sel.wall].statnum == v) return false;
+    changespritestat(g.sel.wall, v);
+    return true;
+}
+
+static bool setSelectedSpriteAngleDirect(int value)
+{
+    if (!selectedSpriteValid()) return false;
+    const short v = static_cast<short>(value & 2047);
+    if (sprite[g.sel.wall].ang == v) return false;
+    sprite[g.sel.wall].ang = v;
+    return true;
+}
+
+static std::string bloodCaptionForSelectedObject()
+{
+    if (!selectedBuildObjectValid()) return "No selected Blood object.";
+
+    char buf[256];
+    switch (g.sel.stat)
+    {
+    case SS_SPRITE:
+        std::snprintf(buf, sizeof(buf), "Sprite %d | %s | stat %d | extra %d",
+            g.sel.wall, bloodTypeLabel("Sprite", sprite[g.sel.wall].lotag, bloodSpriteTypeName(sprite[g.sel.wall].lotag)).c_str(),
+            sprite[g.sel.wall].statnum, sprite[g.sel.wall].extra);
+        break;
+    case SS_WALL:
+    case SS_MASKED_WALL:
+        std::snprintf(buf, sizeof(buf), "Wall %d | %s | extra %d",
+            g.sel.wall, bloodTypeLabel("Wall", wall[g.sel.wall].lotag, bloodWallTypeName(wall[g.sel.wall].lotag)).c_str(),
+            wall[g.sel.wall].extra);
+        break;
+    case SS_CEILING:
+    case SS_FLOOR:
+    default:
+        if (selectedSectorValid())
+            std::snprintf(buf, sizeof(buf), "Sector %d | %s | extra %d",
+                g.sel.sector, bloodTypeLabel("Sector", sector[g.sel.sector].lotag, bloodSectorTypeName(sector[g.sel.sector].lotag)).c_str(),
+                sector[g.sel.sector].extra);
+        else
+            std::snprintf(buf, sizeof(buf), "No selected Blood object.");
+        break;
+    }
+    return buf;
+}
+
+
 static const char* selectedSurfaceName()
 {
     switch (g.sel.stat)
@@ -2922,6 +4367,175 @@ static void editProperties()
     setDirty(); updateInspector(); refreshAllViews();
 }
 
+
+
+static std::string bloodSpriteDefaultChoiceText(const BloodSpriteDefault& def)
+{
+    char buf[256];
+    std::snprintf(buf, sizeof(buf), "Type %3d  %-24s  tile %4d  rep %3d,%3d  pal %d",
+        def.type, bloodSpriteTypeName(def.type), def.picnum, def.xrepeat, def.yrepeat, def.pal);
+    return buf;
+}
+
+static bool bloodChooseSpriteDefault(const BloodSpriteDefault*& outDef)
+{
+    outDef = nullptr;
+    std::vector<std::string> items;
+    items.reserve(BLOOD_COUNT_OF(kBloodSpriteDefaults));
+    for (size_t i = 0; i < BLOOD_COUNT_OF(kBloodSpriteDefaults); ++i)
+        items.push_back(bloodSpriteDefaultChoiceText(kBloodSpriteDefaults[i]));
+
+    int selected = 0;
+    const BloodSpriteDefault* byType = bloodSpriteDefaultByTypeOrPic(selectedSpriteValid() ? sprite[g.sel.wall].lotag : 0, g.selectedTile);
+    if (byType)
+    {
+        for (size_t i = 0; i < BLOOD_COUNT_OF(kBloodSpriteDefaults); ++i)
+            if (&kBloodSpriteDefaults[i] == byType) { selected = static_cast<int>(i); break; }
+    }
+
+    if (!chooseStringIndex("Blood sprite preset", "Choose a Blood sprite type/preset:", items, selected))
+        return false;
+    selected = clamp_int(selected, 0, static_cast<int>(BLOOD_COUNT_OF(kBloodSpriteDefaults)) - 1);
+    outDef = &kBloodSpriteDefaults[selected];
+    return outDef != nullptr;
+}
+
+static void bloodSetSpriteStat(short nSprite, short wantedStat)
+{
+    if (nSprite < 0 || nSprite >= MAXSPRITES) return;
+    wantedStat = static_cast<short>(clamp_int(wantedStat, 0, MAXSTATUS - 1));
+    if (sprite[nSprite].statnum != wantedStat)
+        changespritestat(nSprite, wantedStat);
+}
+
+static short bloodDefaultStatForSpriteType(short type)
+{
+    if (type == 15) return 16;                      // Path marker.
+    if (type >= 40 && type < 81) return 3;           // Weapons/ammo.
+    if (type >= 100 && type < 149) return 3;         // Items.
+    if (type >= 200 && type < 254) return 6;         // Dudes.
+    if (type >= 400 && type < 433) return 4;         // Gib/explode/world objects.
+    if (type >= 450 && type < 460) return 11;        // Hazards/traps.
+    if (type == 710) return 12;                      // Ambient SFX.
+    return 0;
+}
+
+static bool bloodApplySpriteDefault(short nSprite, const BloodSpriteDefault& def, bool forcePicnum)
+{
+    if (nSprite < 0 || nSprite >= MAXSPRITES) return false;
+    spritetype& sp = sprite[nSprite];
+    bool changed = false;
+
+    if (sp.lotag != def.type) { sp.lotag = def.type; changed = true; }
+    if (forcePicnum && def.picnum >= 0 && sp.picnum != def.picnum) { sp.picnum = def.picnum; changed = true; }
+    if (def.xrepeat >= 0 && sp.xrepeat != def.xrepeat) { sp.xrepeat = static_cast<unsigned char>(clamp_int(def.xrepeat, 1, 255)); changed = true; }
+    if (def.yrepeat >= 0 && sp.yrepeat != def.yrepeat) { sp.yrepeat = static_cast<unsigned char>(clamp_int(def.yrepeat, 1, 255)); changed = true; }
+    if (def.pal >= 0 && sp.pal != def.pal) { sp.pal = static_cast<char>(clamp_int(def.pal, 0, 255)); changed = true; }
+
+    if (def.cstat256 == 0 && (sp.cstat & 0x100)) { sp.cstat &= ~0x100; changed = true; }
+    else if (def.cstat256 > 0 && !(sp.cstat & 0x100)) { sp.cstat |= 0x100; changed = true; }
+
+    if (def.type == 18 || def.type == 19 || def.type == 709 || def.type == 710 || def.type == 711)
+    {
+        const short old = sp.cstat;
+        sp.cstat |= static_cast<short>(0x8000);
+        sp.cstat &= static_cast<short>(~0x101);
+        if (sp.cstat != old) changed = true;
+        if (def.type == 709 || def.type == 710 || def.type == 711)
+        {
+            if (sp.shade != -128) { sp.shade = -128; changed = true; }
+        }
+    }
+    else if (def.type == 6 || def.type == 7 || def.type == 9 || def.type == 10 ||
+        def.type == 11 || def.type == 12 || def.type == 13 || def.type == 14 ||
+        def.type == 20 || def.type == 21 || def.type == 22 || def.type == 23)
+    {
+        const short old = sp.cstat;
+        sp.cstat &= static_cast<short>(~0x01);
+        if (sp.cstat != old) changed = true;
+    }
+
+    const short wantedStat = bloodDefaultStatForSpriteType(def.type);
+    if (sp.statnum != wantedStat)
+    {
+        bloodSetSpriteStat(nSprite, wantedStat);
+        changed = true;
+    }
+
+    return changed;
+}
+
+static bool bloodChooseAndApplyPresetToSelectedSprite()
+{
+    if (!isBloodMode())
+    {
+        setStatus("Blood sprite presets are only available in Blood mode.");
+        return false;
+    }
+    if (!selectedSpriteValid())
+    {
+        setStatus("Select a sprite before choosing a Blood preset.");
+        return false;
+    }
+
+    const BloodSpriteDefault* def = nullptr;
+    if (!bloodChooseSpriteDefault(def) || !def) return false;
+    const bool changed = bloodApplySpriteDefault(g.sel.wall, *def, true);
+    g.selectedTile = sprite[g.sel.wall].picnum;
+    centerTextureBarOnSelected();
+    if (changed) setDirty();
+    updateInspector();
+    refreshAllViews();
+    setStatus("Blood preset applied: type %d (%s).", def->type, bloodSpriteTypeName(def->type));
+    return changed;
+}
+
+static bool bloodNormalizeSelectedObject()
+{
+    if (!isBloodMode()) return false;
+    if (selectedSpriteValid())
+    {
+        spritetype& sp = sprite[g.sel.wall];
+        const BloodSpriteDefault* def = bloodSpriteDefaultByTypeOrPic(sp.lotag, sp.picnum);
+        if (!def)
+        {
+            setStatus("No Blood preset matched sprite type %d / tile %d.", sp.lotag, sp.picnum);
+            return false;
+        }
+        const bool changed = bloodApplySpriteDefault(g.sel.wall, *def, def->picnum >= 0);
+        if (changed) setDirty();
+        updateInspector();
+        refreshAllViews();
+        setStatus("Blood sprite %d normalized as type %d (%s).", g.sel.wall, def->type, bloodSpriteTypeName(def->type));
+        return changed;
+    }
+    setStatus("Blood normalization currently applies to sprites; X-sector/X-wall data is shown as tags.");
+    return false;
+}
+
+static void bloodNormalizeMapForBlood(bool quiet)
+{
+    if (!isBloodMode()) return;
+    int changedCount = 0;
+    for (short i = 0; i < MAXSPRITES; ++i)
+    {
+        if (sprite[i].statnum < 0 || sprite[i].statnum >= MAXSTATUS || sprite[i].sectnum < 0 || sprite[i].sectnum >= MAXSECTORS)
+            continue;
+        const BloodSpriteDefault* def = bloodSpriteDefaultByTypeOrPic(sprite[i].lotag, sprite[i].picnum);
+        if (!def) continue;
+        if (bloodApplySpriteDefault(i, *def, def->picnum >= 0))
+            ++changedCount;
+    }
+    if (!quiet)
+        setStatus("Blood sprite normalization touched %d sprite(s).", changedCount);
+    if (changedCount > 0)
+    {
+        setDirty();
+        updateInspector();
+        refreshAllViews();
+    }
+}
+
 static void insertSpriteAt(long mx, long my)
 {
     short sect = -1;
@@ -2950,6 +4564,14 @@ static void insertSpriteAt(long mx, long my)
     sp.xvel = sp.yvel = sp.zvel = 0;
     sp.lotag = sp.hitag = 0;
     sp.extra = -1;
+    if (isBloodMode())
+    {
+        const BloodSpriteDefault* def = nullptr;
+        if (bloodChooseSpriteDefault(def) && def)
+            bloodApplySpriteDefault(idx, *def, true);
+        else
+            sp.lotag = 0; // Decoration.
+    }
     setsprite(idx, mx, my, sp.z);
     g.sel.stat = SS_SPRITE;
     g.sel.wall = idx;
@@ -3729,12 +5351,26 @@ static void rasterize2DView(HWND hwnd)
             sprite[i].sectnum < 0 || sprite[i].sectnum >= MAXSECTORS) continue;
         int sx, sy;
         mapToScreen(hwnd, sprite[i].x, sprite[i].y, sx, sy);
-        const std::uint32_t c = (g.sel.stat == SS_SPRITE && g.sel.wall == i) ? makeColor(80, 255, 80) : makeColor(80, 180, 255);
+        std::uint32_t c = (g.sel.stat == SS_SPRITE && g.sel.wall == i) ? makeColor(80, 255, 80) : makeColor(80, 180, 255);
+        if (isBloodMode())
+        {
+            const int t = sprite[i].lotag;
+            if (t >= 200 && t < 254) c = makeColor(255, 80, 80);
+            else if (t >= 400 && t < 460) c = makeColor(230, 120, 255);
+            else if (t >= 20 && t < 33) c = makeColor(255, 180, 64);
+            else if (t >= 6 && t <= 19) c = makeColor(120, 255, 180);
+        }
         drawLine2D(sx - 5, sy, sx + 5, sy, c, 2);
         drawLine2D(sx, sy - 5, sx, sy + 5, c, 2);
         const int ax = sx + ((sintable[(sprite[i].ang + 512) & 2047]) >> 12);
         const int ay = sy + ((sintable[sprite[i].ang & 2047]) >> 12);
         drawLine2D(sx, sy, ax, ay, c, 1);
+        if (g.showTags && isBloodMode() && sprite[i].lotag != 0)
+        {
+            char sbuf[96];
+            std::snprintf(sbuf, sizeof(sbuf), "%d:%s", sprite[i].lotag, bloodSpriteTypeName(sprite[i].lotag));
+            drawText2D(sx + 7, sy - 4, sbuf, makeColor(210, 210, 120));
+        }
     }
 
     auto drawArrow = [&](long x, long y, short a, std::uint32_t c)
@@ -3764,8 +5400,16 @@ static void rasterize2DView(HWND hwnd)
 
             int sx, sy;
             mapToScreen(hwnd, ax, ay, sx, sy);
-            char buf[64];
-            std::snprintf(buf, sizeof(buf), "S%d L%d H%d", s, sector[s].lotag, sector[s].hitag);
+            char buf[160];
+            if (isBloodMode())
+            {
+                std::snprintf(buf, sizeof(buf), "S%d %d:%s H%d E%d", s, sector[s].lotag,
+                    bloodSectorTypeName(sector[s].lotag), sector[s].hitag, sector[s].extra);
+            }
+            else
+            {
+                std::snprintf(buf, sizeof(buf), "S%d L%d H%d", s, sector[s].lotag, sector[s].hitag);
+            }
             drawText2D(sx - 20, sy - 8, buf, makeColor(180, 180, 80));
         }
     }
@@ -4415,21 +6059,44 @@ static bool promptForDukeGrpPath()
     OPENFILENAMEA ofn{};
     ofn.lStructSize = sizeof(ofn);
     ofn.hwndOwner = g.main;
-    ofn.lpstrFilter = "Duke Nukem 3D GRP (DUKE3D.GRP)\0DUKE3D.GRP;duke3d.grp\0BUILD group files (*.grp)\0*.grp\0All files (*.*)\0*.*\0";
+    const char* filter = isBloodMode()
+        ? "Blood data/art (BLOOD.RFF;TILES000.ART)\0BLOOD.RFF;blood.rff;TILES000.ART;tiles000.art\0Blood RFF archives (*.rff)\0*.rff\0ART files (*.art)\0*.art\0All files (*.*)\0*.*\0"
+        : "Duke Nukem 3D GRP (DUKE3D.GRP)\0DUKE3D.GRP;duke3d.grp\0BUILD group files (*.grp)\0*.grp\0All files (*.*)\0*.*\0";
+    ofn.lpstrFilter = filter;
     ofn.lpstrFile = file;
     ofn.nMaxFile = sizeof(file);
     ofn.Flags = OFN_FILEMUSTEXIST | OFN_HIDEREADONLY;
-    ofn.lpstrDefExt = "grp";
+    ofn.lpstrDefExt = isBloodMode() ? "rff" : "grp";
     if (!GetOpenFileNameA(&ofn)) return false;
 
     g.dukeGrpPath = fullPathOf(file);
     g.grpEditPath = g.dukeGrpPath;
-    if (g.grpExportPath.empty()) g.grpExportPath = pathJoin(pathDirectory(g.grpEditPath), "grp_export");
-    updateGrpEditPanel();
-    if (!loadPaletteFromGrp(g.dukeGrpPath.c_str()))
+    if (g.grpExportPath.empty())
+        g.grpExportPath = pathJoin(pathDirectory(g.grpEditPath), isBloodMode() && isRffArchivePath(g.grpEditPath.c_str()) ? "rff_export" : "grp_export");
+
+    if (isBloodMode())
+    {
+        g.bloodDataPath = g.dukeGrpPath;
+        if (isRffArchivePath(g.dukeGrpPath.c_str()))
+        {
+            g.bloodRffPath = g.dukeGrpPath;
+            g.bloodRffPrepared = false;
+            prepareBloodRffCache(g.bloodRffPath);
+            if (!loadPaletteFromGrp(g.bloodRffPath.c_str()))
+                MessageBoxA(g.main, "Could not read PALETTE.DAT from the selected BLOOD.RFF.", "Tile art", MB_ICONWARNING);
+        }
+        else if (!loadBloodPaletteFromFolder(pathDirectory(g.dukeGrpPath)))
+        {
+            MessageBoxA(g.main, "Could not find a readable PALETTE.DAT beside the selected Blood data/art file.", "Tile art", MB_ICONWARNING);
+        }
+        loadBloodArtSetFromCurrentData();
+    }
+    else if (!loadPaletteFromGrp(g.dukeGrpPath.c_str()))
     {
         MessageBoxA(g.main, "The selected GRP did not contain a readable PALETTE.DAT.", "Tile art", MB_ICONWARNING);
     }
+
+    updateGrpEditPanel();
     updateTileArtPanel();
     refreshAllViews();
     return true;
@@ -4437,6 +6104,57 @@ static bool promptForDukeGrpPath()
 
 static bool ensureDukeGrpPath()
 {
+    if (isBloodMode())
+    {
+        if (!g.dukeGrpPath.empty() && fileExistsA(g.dukeGrpPath.c_str()))
+        {
+            if (isRffArchivePath(g.dukeGrpPath.c_str()))
+            {
+                g.bloodRffPath = g.dukeGrpPath;
+                g.bloodDataPath = g.dukeGrpPath;
+                prepareBloodRffCache(g.bloodRffPath);
+                reloadCurrentGamePalette();
+                return true;
+            }
+            loadBloodPaletteFromFolder(pathDirectory(g.dukeGrpPath));
+            return true;
+        }
+        if (fileExistsA("BLOOD.RFF"))
+        {
+            g.dukeGrpPath = fullPathOf("BLOOD.RFF");
+            g.bloodDataPath = g.dukeGrpPath;
+            g.bloodRffPath = g.dukeGrpPath;
+            prepareBloodRffCache(g.bloodRffPath);
+            reloadCurrentGamePalette();
+            return true;
+        }
+        if (fileExistsA("blood.rff"))
+        {
+            g.dukeGrpPath = fullPathOf("blood.rff");
+            g.bloodDataPath = g.dukeGrpPath;
+            g.bloodRffPath = g.dukeGrpPath;
+            prepareBloodRffCache(g.bloodRffPath);
+            reloadCurrentGamePalette();
+            return true;
+        }
+        if (fileExistsA("TILES000.ART"))
+        {
+            g.dukeGrpPath = fullPathOf("TILES000.ART");
+            g.bloodRffPath.clear();
+            g.bloodRffPrepared = false;
+            loadBloodPaletteFromFolder(pathDirectory(g.dukeGrpPath));
+            return true;
+        }
+        if (fileExistsA("tiles000.art"))
+        {
+            g.dukeGrpPath = fullPathOf("tiles000.art");
+            g.bloodRffPath.clear();
+            g.bloodRffPrepared = false;
+            loadBloodPaletteFromFolder(pathDirectory(g.dukeGrpPath));
+            return true;
+        }
+        return promptForDukeGrpPath();
+    }
     if (!g.dukeGrpPath.empty() && fileExistsA(g.dukeGrpPath.c_str())) return true;
     if (!g.boardGrpPath.empty() && fileExistsA(g.boardGrpPath.c_str()))
     {
@@ -4498,9 +6216,11 @@ static void updateTileArtPanel()
     if (g.artStatusLabel)
     {
         char text[512];
-        const std::string grp = g.dukeGrpPath.empty() ? std::string("No DUKE3D.GRP selected") : pathBaseNameString(g.dukeGrpPath);
+        const std::string grp = g.dukeGrpPath.empty()
+            ? std::string(isBloodMode() ? "No Blood data/art selected" : "No DUKE3D.GRP selected")
+            : pathBaseNameString(g.dukeGrpPath);
         const bool dirty = g.artDirty;
-        std::snprintf(text, sizeof(text), "Tile %d   %dx%d   %s   GRP: %s",
+        std::snprintf(text, sizeof(text), "Tile %d   %dx%d   %s   Data: %s",
             g.selectedTile,
             (g.selectedTile >= 0 && g.selectedTile < MAXTILES) ? tilesizx[g.selectedTile] : 0,
             (g.selectedTile >= 0 && g.selectedTile < MAXTILES) ? tilesizy[g.selectedTile] : 0,
@@ -4571,7 +6291,7 @@ static bool importSelectedTileFromPng()
     short tile = g.selectedTile;
     if (!readTileArtTileNumber(tile)) return false;
     if (!ensureDukeGrpPath()) return false;
-    loadPaletteFromGrp(g.dukeGrpPath.c_str());
+    reloadCurrentGamePalette();
 
     char file[MAX_PATH] = "";
     OPENFILENAMEA ofn{};
@@ -4617,7 +6337,7 @@ static bool importSelectedTileFromPng()
         return false;
     }
 
-    setStatus("Imported PNG into tile %d. Use File > Save or Save ART files to write TILES%03d.ART next to the GRP.", tile, tile / 256);
+    setStatus("Imported PNG into tile %d. Use File > Save or Save ART files to write TILES%03d.ART beside the current game data.", tile, tile / 256);
     return true;
 }
 
@@ -4804,6 +6524,199 @@ static bool writeFileBytesA(const std::string& path, const std::vector<unsigned 
     return ok;
 }
 
+static bool bloodRffEntryIsArt(const std::string& name)
+{
+    const std::string up = upperAscii(name);
+    return up.size() >= 9 && (up.find("TILES") == 0 || up.find("SHARE") == 0) && up.substr(up.size() - 4) == ".ART";
+}
+
+static bool bloodRffEntryShouldExtractForArt(const std::string& name)
+{
+    const std::string up = upperAscii(name);
+    return bloodRffEntryIsArt(up) ||
+        up == "PALETTE.DAT" ||
+        up == "PALOOKUP.DAT" ||
+        up == "LOOKUP.DAT" ||
+        up == "TRANSLUC.TBL";
+}
+
+static std::string bloodRffCacheFolder()
+{
+    char tempDir[MAX_PATH] = {};
+    if (!GetTempPathA(sizeof(tempDir), tempDir)) return std::string();
+    char folderName[64] = {};
+    std::snprintf(folderName, sizeof(folderName), "BuildX_BloodRFF_%lu", static_cast<unsigned long>(GetCurrentProcessId()));
+    return pathJoin(tempDir, folderName);
+}
+
+static bool prepareBloodRffCache(const std::string& rffPath)
+{
+    if (rffPath.empty() || !fileExistsA(rffPath.c_str()) || !isRffArchivePath(rffPath.c_str())) return false;
+
+    const std::string full = fullPathOf(rffPath.c_str());
+    const std::string existingArt = g.bloodExtractPath.empty() ? std::string() : pathJoin(g.bloodExtractPath, "TILES000.ART");
+    if (g.bloodRffPrepared && g.bloodRffPath == full && !existingArt.empty() && fileExistsA(existingArt.c_str()))
+        return true;
+
+    std::vector<GrpMapEntry> entries;
+    if (!readRffEntries(full.c_str(), entries)) return false;
+
+    const std::string cache = bloodRffCacheFolder();
+    if (cache.empty() || !ensureDirectoryTreeA(cache)) return false;
+
+    int artCount = 0;
+    int supportCount = 0;
+    for (const GrpMapEntry& e : entries)
+    {
+        if (!bloodRffEntryShouldExtractForArt(e.name)) continue;
+
+        std::vector<unsigned char> bytes;
+        if (!readGrpEntryBytes(full.c_str(), e, bytes)) continue;
+
+        const std::string outName = sanitizeFileName(upperAscii(e.name));
+        const std::string outPath = pathJoin(cache, outName);
+        if (!writeFileBytesA(outPath, bytes)) continue;
+
+        if (bloodRffEntryIsArt(e.name)) ++artCount;
+        else ++supportCount;
+    }
+
+    if (artCount <= 0) return false;
+
+    g.bloodRffPath = full;
+    g.bloodDataPath = full;
+    g.dukeGrpPath = full;
+    if (g.grpEditPath.empty()) g.grpEditPath = full;
+    if (g.grpExportPath.empty()) g.grpExportPath = pathJoin(pathDirectory(full), "rff_export");
+    g.bloodExtractPath = cache;
+    g.bloodRffPrepared = true;
+
+    loadPaletteFromGrp(full.c_str());
+    setStatus("Mounted BLOOD.RFF: extracted %d ART file(s)%s to a temporary cache.", artCount, supportCount ? " plus support tables" : "");
+    return true;
+}
+
+static std::string bloodArtPathForLoad()
+{
+    if (!g.bloodRffPath.empty() && prepareBloodRffCache(g.bloodRffPath))
+        return pathJoin(g.bloodExtractPath, "TILES000.ART");
+
+    if (!g.dukeGrpPath.empty() && fileExistsA(g.dukeGrpPath.c_str()))
+    {
+        if (isRffArchivePath(g.dukeGrpPath.c_str()) && prepareBloodRffCache(g.dukeGrpPath))
+            return pathJoin(g.bloodExtractPath, "TILES000.ART");
+
+        const std::string base = upperAscii(pathBaseNameString(g.dukeGrpPath));
+        if (bloodRffEntryIsArt(base)) return g.dukeGrpPath;
+
+        const std::string looseArt = pathJoin(pathDirectory(g.dukeGrpPath), "TILES000.ART");
+        if (fileExistsA(looseArt.c_str())) return looseArt;
+        const std::string looseArtLower = pathJoin(pathDirectory(g.dukeGrpPath), "tiles000.art");
+        if (fileExistsA(looseArtLower.c_str())) return looseArtLower;
+    }
+
+    if (fileExistsA("TILES000.ART")) return "TILES000.ART";
+    return "tiles000.art";
+}
+
+
+static int countLoadedBuildTiles()
+{
+    int count = 0;
+    for (int i = 0; i < MAXTILES; ++i)
+        if (tilesizx[i] > 0 && tilesizy[i] > 0)
+            ++count;
+    return count;
+}
+
+static bool artSetBaseExistsInFolder(const std::string& folder, const char* baseName)
+{
+    if (!baseName || !baseName[0]) return false;
+    return fileExistsA(pathJoin(folder, baseName).c_str());
+}
+
+static std::string chooseArtBaseNameForFolder(const std::string& folder, const std::string& requestedBase)
+{
+    // BUILD's loadpics() rewrites the three digits in an 8.3 ART base name
+    // while scanning a sequence such as TILES000.ART, TILES001.ART, etc.
+    // Passing an absolute path can corrupt the path, so this helper always
+    // changes into the ART folder and passes only the 8.3 base name.
+    if (!requestedBase.empty() && requestedBase.size() >= 12 && artSetBaseExistsInFolder(folder, requestedBase.c_str()))
+        return requestedBase;
+
+    static const char* kBaseNames[] = {
+        "tiles000.art", "TILES000.ART",
+        "share000.art", "SHARE000.ART",
+    };
+    for (size_t i = 0; i < BLOOD_COUNT_OF(kBaseNames); ++i)
+        if (artSetBaseExistsInFolder(folder, kBaseNames[i]))
+            return kBaseNames[i];
+
+    return "tiles000.art";
+}
+
+static bool loadArtSetFromPathOrFolder(const std::string& artPathOrFolder, const char* statusLabel)
+{
+    std::string folder;
+    std::string requestedBase;
+
+    if (!artPathOrFolder.empty() && directoryExistsA(artPathOrFolder.c_str()))
+    {
+        folder = artPathOrFolder;
+    }
+    else if (!artPathOrFolder.empty())
+    {
+        folder = pathDirectory(artPathOrFolder);
+        requestedBase = pathBaseNameString(artPathOrFolder);
+    }
+    else
+    {
+        folder = ".";
+    }
+
+    if (folder.empty()) folder = ".";
+    if (!directoryExistsA(folder.c_str())) return false;
+
+    const std::string baseName = chooseArtBaseNameForFolder(folder, requestedBase);
+    if (!artSetBaseExistsInFolder(folder, baseName.c_str()))
+    {
+        setStatus("No ART base file found in %s", folder.c_str());
+        return false;
+    }
+
+    char oldDir[MAX_PATH] = {};
+    const DWORD oldLen = GetCurrentDirectoryA(sizeof(oldDir), oldDir);
+    const bool canRestore = oldLen > 0 && oldLen < sizeof(oldDir);
+
+    if (!SetCurrentDirectoryA(folder.c_str())) return false;
+
+    char artName[32] = {};
+    std::strncpy(artName, baseName.c_str(), sizeof(artName) - 1);
+    loadpics(artName);
+
+    if (canRestore) SetCurrentDirectoryA(oldDir);
+
+    reloadCurrentGamePalette();
+    refreshTileList();
+    refreshAllViews();
+
+    const int loaded = countLoadedBuildTiles();
+    if (loaded > 0)
+    {
+        setStatus("Loaded %d %s tile(s) from %s", loaded, statusLabel ? statusLabel : "BUILD", pathJoin(folder, baseName).c_str());
+        return true;
+    }
+
+    setStatus("No tiles loaded from %s", pathJoin(folder, baseName).c_str());
+    return false;
+}
+
+static bool loadBloodArtSetFromCurrentData()
+{
+    if (!isBloodMode()) return false;
+    return loadArtSetFromPathOrFolder(bloodArtPathForLoad(), "Blood");
+}
+
 static std::string sanitizeGrpEntryName(const std::string& sourcePath)
 {
     std::string name = pathBaseNameString(sourcePath);
@@ -4826,11 +6739,12 @@ static std::string sanitizeGrpEntryName(const std::string& sourcePath)
 static std::string defaultGrpExportPath()
 {
     std::string base;
-    if (!g.grpEditPath.empty()) base = pathDirectory(g.grpEditPath);
-    else if (!g.dukeGrpPath.empty()) base = pathDirectory(g.dukeGrpPath);
-    else if (!g.boardGrpPath.empty()) base = pathDirectory(g.boardGrpPath);
+    std::string archivePath;
+    if (!g.grpEditPath.empty()) { base = pathDirectory(g.grpEditPath); archivePath = g.grpEditPath; }
+    else if (!g.dukeGrpPath.empty()) { base = pathDirectory(g.dukeGrpPath); archivePath = g.dukeGrpPath; }
+    else if (!g.boardGrpPath.empty()) { base = pathDirectory(g.boardGrpPath); archivePath = g.boardGrpPath; }
     else base = moduleDirectory();
-    return pathJoin(base, "grp_export");
+    return pathJoin(base, (!archivePath.empty() && isRffArchivePath(archivePath.c_str())) ? "rff_export" : "grp_export");
 }
 
 static void syncGrpExportPathFromEdit()
@@ -4852,26 +6766,34 @@ static bool promptSelectGrpForEditor()
     OPENFILENAMEA ofn{};
     ofn.lStructSize = sizeof(ofn);
     ofn.hwndOwner = g.main;
-    ofn.lpstrFilter = "BUILD group files (*.grp)\0*.grp\0All files (*.*)\0*.*\0";
+    ofn.lpstrFilter = isBloodMode()
+        ? "Build/Blood archives (*.grp;*.rff)\0*.grp;*.rff\0Blood RFF archives (*.rff)\0*.rff\0BUILD group files (*.grp)\0*.grp\0All files (*.*)\0*.*\0"
+        : "BUILD group files (*.grp)\0*.grp\0All files (*.*)\0*.*\0";
     ofn.lpstrFile = file;
     ofn.nMaxFile = sizeof(file);
     ofn.Flags = OFN_FILEMUSTEXIST | OFN_HIDEREADONLY;
-    ofn.lpstrDefExt = "grp";
+    ofn.lpstrDefExt = isBloodMode() ? "rff" : "grp";
     if (!GetOpenFileNameA(&ofn)) return false;
 
     std::vector<GrpMapEntry> entries;
     if (!readGrpEntries(file, entries))
     {
-        MessageBoxA(g.main, "Could not read that GRP file. Make sure it is a Ken Silverman BUILD .grp file.", "GRP Edit", MB_ICONERROR);
+        MessageBoxA(g.main, "Could not read that archive. Use a Ken Silverman BUILD .grp or Blood .rff file.", "Archive Edit", MB_ICONERROR);
         return false;
     }
 
     g.grpEditPath = fullPathOf(file);
     if (g.dukeGrpPath.empty()) g.dukeGrpPath = g.grpEditPath;
+    if (isBloodMode() && isRffArchivePath(g.grpEditPath.c_str()))
+    {
+        g.bloodDataPath = g.grpEditPath;
+        g.bloodRffPath = g.grpEditPath;
+        prepareBloodRffCache(g.bloodRffPath);
+    }
     if (g.grpExportPath.empty()) g.grpExportPath = defaultGrpExportPath();
     loadPaletteFromGrp(g.grpEditPath.c_str());
     updateGrpEditPanel();
-    setStatus("GRP editor opened %s.", pathBaseNameString(g.grpEditPath).c_str());
+    setStatus("Archive editor opened %s.", pathBaseNameString(g.grpEditPath).c_str());
     return true;
 }
 
@@ -4909,9 +6831,9 @@ static void updateGrpEditPanel()
     {
         char text[MAX_PATH * 2] = {};
         if (!g.grpEditPath.empty())
-            std::snprintf(text, sizeof(text), "GRP: %s", g.grpEditPath.c_str());
+            std::snprintf(text, sizeof(text), "Archive: %s", g.grpEditPath.c_str());
         else
-            std::snprintf(text, sizeof(text), "GRP: no file selected");
+            std::snprintf(text, sizeof(text), "Archive: no file selected");
         SetWindowTextA(g.grpPathLabel, text);
     }
 
@@ -4937,7 +6859,7 @@ static bool promptGrpExportPath(const char* title)
 {
     syncGrpExportPathFromEdit();
     std::string folder = g.grpExportPath.empty() ? defaultGrpExportPath() : g.grpExportPath;
-    if (!promptString(title ? title : "GRP export path", "Export folder:", folder)) return false;
+    if (!promptString(title ? title : "Archive export path", "Export folder:", folder)) return false;
     g.grpExportPath = folder;
     if (g.grpExportPathEdit) SetWindowTextA(g.grpExportPathEdit, g.grpExportPath.c_str());
     return true;
@@ -4976,14 +6898,14 @@ static bool extractGrpEntriesToFolderByIndices(const std::vector<int>& requested
     if (g.grpExportPath.empty()) g.grpExportPath = defaultGrpExportPath();
     if (!ensureDirectoryTreeA(g.grpExportPath))
     {
-        MessageBoxA(g.main, "Could not create the export folder.", "GRP Extract", MB_ICONERROR);
+        MessageBoxA(g.main, "Could not create the export folder.", "Archive Extract", MB_ICONERROR);
         return false;
     }
 
     std::vector<GrpMapEntry> entries;
     if (!readGrpEntries(g.grpEditPath.c_str(), entries))
     {
-        MessageBoxA(g.main, "Could not read the GRP file.", "GRP Extract", MB_ICONERROR);
+        MessageBoxA(g.main, "Could not read the archive file.", "Archive Extract", MB_ICONERROR);
         return false;
     }
 
@@ -4995,7 +6917,7 @@ static bool extractGrpEntriesToFolderByIndices(const std::vector<int>& requested
 
     if (indices.empty())
     {
-        MessageBoxA(g.main, "Select one or more GRP entries to extract.", "GRP Extract", MB_ICONINFORMATION);
+        MessageBoxA(g.main, "Select one or more archive entries to extract.", "Archive Extract", MB_ICONINFORMATION);
         return false;
     }
 
@@ -5004,7 +6926,7 @@ static bool extractGrpEntriesToFolderByIndices(const std::vector<int>& requested
         char msg[512] = {};
         std::snprintf(msg, sizeof(msg), "Extract %d selected GRP entr%s to:\r\n%s\r\n\r\nExisting files with the same names will ask before being overwritten.",
             static_cast<int>(indices.size()), indices.size() == 1 ? "y" : "ies", g.grpExportPath.c_str());
-        if (MessageBoxA(g.main, msg, "GRP Extract", MB_ICONQUESTION | MB_YESNO) != IDYES)
+        if (MessageBoxA(g.main, msg, "Archive Extract", MB_ICONQUESTION | MB_YESNO) != IDYES)
             return false;
     }
 
@@ -5024,7 +6946,7 @@ static bool extractGrpEntriesToFolderByIndices(const std::vector<int>& requested
         {
             char msg[MAX_PATH * 2] = {};
             std::snprintf(msg, sizeof(msg), "%s already exists. Overwrite it?", outPath.c_str());
-            const int r = MessageBoxA(g.main, msg, "GRP Extract", MB_ICONQUESTION | MB_YESNOCANCEL);
+            const int r = MessageBoxA(g.main, msg, "Archive Extract", MB_ICONQUESTION | MB_YESNOCANCEL);
             if (r == IDCANCEL) break;
             if (r != IDYES)
             {
@@ -5055,29 +6977,29 @@ static bool extractGrpEntryToFolderByIndex(int index)
 static bool extractAllGrpEntries()
 {
     if (!ensureGrpEditorPath(true)) return false;
-    if (!promptGrpExportPath("Extract all GRP files")) return false;
+    if (!promptGrpExportPath("Extract all archive files")) return false;
     if (!ensureDirectoryTreeA(g.grpExportPath))
     {
-        MessageBoxA(g.main, "Could not create the export folder.", "GRP Extract All", MB_ICONERROR);
+        MessageBoxA(g.main, "Could not create the export folder.", "Archive Extract All", MB_ICONERROR);
         return false;
     }
 
     std::vector<GrpMapEntry> entries;
     if (!readGrpEntries(g.grpEditPath.c_str(), entries))
     {
-        MessageBoxA(g.main, "Could not read the GRP file.", "GRP Extract All", MB_ICONERROR);
+        MessageBoxA(g.main, "Could not read the archive file.", "Archive Extract All", MB_ICONERROR);
         return false;
     }
     if (entries.empty())
     {
-        MessageBoxA(g.main, "That GRP has no entries.", "GRP Extract All", MB_ICONINFORMATION);
+        MessageBoxA(g.main, "That archive has no entries.", "Archive Extract All", MB_ICONINFORMATION);
         return false;
     }
 
     char msg[512] = {};
     std::snprintf(msg, sizeof(msg), "Extract %d file(s) to:\r\n%s\r\n\r\nExisting files with the same names will be overwritten.",
         static_cast<int>(entries.size()), g.grpExportPath.c_str());
-    if (MessageBoxA(g.main, msg, "GRP Extract All", MB_ICONQUESTION | MB_YESNO) != IDYES)
+    if (MessageBoxA(g.main, msg, "Archive Extract All", MB_ICONQUESTION | MB_YESNO) != IDYES)
         return false;
 
     int written = 0;
@@ -5089,7 +7011,7 @@ static bool extractAllGrpEntries()
         if (writeFileBytesA(outPath, bytes)) ++written;
     }
 
-    setStatus("Extracted %d of %d GRP file(s) to %s.", written, static_cast<int>(entries.size()), g.grpExportPath.c_str());
+    setStatus("Extracted %d of %d archive file(s) to %s.", written, static_cast<int>(entries.size()), g.grpExportPath.c_str());
     return written == static_cast<int>(entries.size());
 }
 
@@ -5162,6 +7084,12 @@ static bool importFilesIntoGrp(const std::vector<std::string>& paths)
 {
     if (paths.empty()) return false;
     if (!ensureGrpEditorPath(true)) return false;
+
+    if (isRffArchivePath(g.grpEditPath.c_str()))
+    {
+        MessageBoxA(g.main, "RFF archives are supported for browsing and extraction, but this editor does not rewrite/encrypt RFF files yet. Extract files and keep Blood resources loose for now.", "RFF Import", MB_ICONINFORMATION);
+        return false;
+    }
 
     char msg[512] = {};
     std::snprintf(msg, sizeof(msg), "Import %d file(s) into:\r\n%s\r\n\r\nThe GRP will be rewritten. Existing matching 12-character entry names will be replaced.",
@@ -5296,7 +7224,7 @@ static void drawGrpEditPanel(HWND hwnd, HDC hdc)
     SetBkMode(hdc, TRANSPARENT);
     SetTextColor(hdc, theme::MutedText);
     HFONT oldFont = reinterpret_cast<HFONT>(SelectObject(hdc, GetStockObject(DEFAULT_GUI_FONT)));
-    const char* note = "GRP Edit: select a GRP, choose an export folder, extract one/all entries, or import files into the archive.";
+    const char* note = "Archive Edit: select a GRP/RFF, choose an export folder, extract one/all entries; GRP import is supported, RFF import is read-only.";
     RECT textRc{ 14, max(0, rc.bottom - 20), max(15, rc.right - 14), max(1, rc.bottom - 4) };
     DrawTextA(hdc, note, -1, &textRc, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
     SelectObject(hdc, oldFont);
@@ -5307,8 +7235,8 @@ static LRESULT CALLBACK GrpEditProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     switch (msg)
     {
     case WM_CREATE:
-        g.grpPathLabel = makeTileArtControl(hwnd, "STATIC", "GRP: no file selected", SS_LEFT, 0, 1409);
-        g.grpSelectButton = makeTileArtControl(hwnd, "BUTTON", "Select GRP...", BS_PUSHBUTTON, 0, ids::ID_GRP_SELECT_GRP);
+        g.grpPathLabel = makeTileArtControl(hwnd, "STATIC", "Archive: no file selected", SS_LEFT, 0, 1409);
+        g.grpSelectButton = makeTileArtControl(hwnd, "BUTTON", "Select Archive...", BS_PUSHBUTTON, 0, ids::ID_GRP_SELECT_GRP);
         g.grpRefreshButton = makeTileArtControl(hwnd, "BUTTON", "Refresh", BS_PUSHBUTTON, 0, ids::ID_GRP_REFRESH);
         makeTileArtControl(hwnd, "STATIC", "Export folder", SS_LEFT, 0, 1410);
         g.grpExportPathEdit = makeTileArtControl(hwnd, "EDIT", "", ES_AUTOHSCROLL, WS_EX_CLIENTEDGE, ids::ID_GRP_EXPORT_PATH_EDIT);
@@ -5331,7 +7259,7 @@ static LRESULT CALLBACK GrpEditProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             promptSelectGrpForEditor();
             return 0;
         case ids::ID_GRP_CHANGE_EXPORT_PATH:
-            promptGrpExportPath("GRP export path");
+            promptGrpExportPath("Archive export path");
             return 0;
         case ids::ID_GRP_EXTRACT_SELECTED:
             extractGrpEntriesToFolderByIndices(selectedGrpEntryIndices());
@@ -5534,7 +7462,7 @@ static LRESULT CALLBACK TileArtProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         g.artImportButton = makeTileArtControl(hwnd, "BUTTON", "Import PNG...", BS_PUSHBUTTON, 0, ids::ID_ART_IMPORT_PNG);
         g.artExportButton = makeTileArtControl(hwnd, "BUTTON", "Export PNG...", BS_PUSHBUTTON, 0, ids::ID_ART_EXPORT_PNG);
         g.artSaveButton = makeTileArtControl(hwnd, "BUTTON", "Save ART files", BS_PUSHBUTTON, 0, ids::ID_ART_SAVE_ART);
-        g.artPaletteButton = makeTileArtControl(hwnd, "BUTTON", "Reload palette from GRP", BS_PUSHBUTTON, 0, ids::ID_ART_RELOAD_GRP_PALETTE);
+        g.artPaletteButton = makeTileArtControl(hwnd, "BUTTON", "Reload palette from data", BS_PUSHBUTTON, 0, ids::ID_ART_RELOAD_GRP_PALETTE);
         g.artStatusLabel = makeTileArtControl(hwnd, "STATIC", "Tile art ready", SS_LEFT, 0, 1311);
         layoutTileArtControls(hwnd);
         updateTileArtPanel();
@@ -5559,10 +7487,17 @@ static LRESULT CALLBACK TileArtProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             saveModifiedArtFiles();
             return 0;
         case ids::ID_ART_RELOAD_GRP_PALETTE:
-            if (ensureDukeGrpPath() && loadPaletteFromGrp(g.dukeGrpPath.c_str()))
+            if (ensureDukeGrpPath() && reloadCurrentGamePalette())
             {
-                setStatus("Reloaded Duke3D palette from %s.", pathBaseNameString(g.dukeGrpPath).c_str());
-                refreshAllViews();
+                if (isBloodMode())
+                    loadBloodArtSetFromCurrentData();
+                else
+                    refreshAllViews();
+                setStatus("Reloaded %s palette%s from %s.", isBloodMode() ? "Blood" : "Duke3D", isBloodMode() ? " and tiles" : "", pathBaseNameString(g.dukeGrpPath).c_str());
+            }
+            else
+            {
+                MessageBoxA(g.main, "Could not reload a palette from the current game data.", "Tile art", MB_ICONWARNING);
             }
             return 0;
         }
@@ -5704,7 +7639,12 @@ static void updateInspector()
 
     if (g.inspSurfaceGroup) SetWindowTextA(g.inspSurfaceGroup, "Surface / Material");
     if (g.inspPositionGroup) SetWindowTextA(g.inspPositionGroup, "Sprite Position");
-    if (g.inspSectorGroup) SetWindowTextA(g.inspSectorGroup, "Sector Data");
+    if (g.inspSectorGroup) SetWindowTextA(g.inspSectorGroup, isBloodMode() ? "Current Sector" : "Sector Data");
+    if (g.inspBloodGroup) SetWindowTextA(g.inspBloodGroup, isBloodMode() ? "Blood / Extended Tags" : "Advanced Build Fields");
+    HWND labelLotag = GetDlgItem(g.inspector, 1205);
+    HWND labelHitag = GetDlgItem(g.inspector, 1206);
+    if (labelLotag) SetWindowTextA(labelLotag, isBloodMode() ? "Type" : "Lotag");
+    if (labelHitag) SetWindowTextA(labelHitag, isBloodMode() ? "Data" : "Hitag");
 
     SetWindowTextA(g.inspSurfaceTitle, surfaceOk ? selectedSurfaceName() : "Select a wall, floor, ceiling, or sprite");
     enableCtl(g.inspTileEdit, surfaceOk);
@@ -5764,6 +7704,50 @@ static void updateInspector()
         setEditBlank(g.inspVisEdit);
         setEditBlank(g.inspLotagEdit);
         setEditBlank(g.inspHitagEdit);
+    }
+
+
+    const bool objectOk = selectedBuildObjectValid();
+    if (g.inspBloodTitle)
+    {
+        const std::string caption = isBloodMode() ? bloodCaptionForSelectedObject() : std::string("Edit selected object lotag/hitag/extra/cstat directly.");
+        SetWindowTextA(g.inspBloodTitle, caption.c_str());
+    }
+
+    enableCtl(g.inspTypeEdit, objectOk);
+    enableCtl(g.inspObjHitagEdit, objectOk);
+    enableCtl(g.inspExtraEdit, objectOk);
+    enableCtl(g.inspCstatEdit, surfaceOk);
+    enableCtl(g.inspStatnumEdit, spriteOk);
+    enableCtl(g.inspAngEdit, spriteOk);
+    enableCtl(g.inspBloodPresetButton, isBloodMode() && spriteOk);
+    enableCtl(g.inspBloodFixupButton, isBloodMode() && objectOk);
+
+    if (objectOk)
+    {
+        setEditLong(g.inspTypeEdit, getSelectedTypeValue());
+        setEditLong(g.inspObjHitagEdit, getSelectedHitagValue());
+        setEditLong(g.inspExtraEdit, getSelectedExtraValue());
+    }
+    else
+    {
+        setEditBlank(g.inspTypeEdit);
+        setEditBlank(g.inspObjHitagEdit);
+        setEditBlank(g.inspExtraEdit);
+    }
+
+    if (surfaceOk) setEditLong(g.inspCstatEdit, getSelectedCstatValue());
+    else setEditBlank(g.inspCstatEdit);
+
+    if (spriteOk)
+    {
+        setEditLong(g.inspStatnumEdit, sprite[g.sel.wall].statnum);
+        setEditLong(g.inspAngEdit, sprite[g.sel.wall].ang);
+    }
+    else
+    {
+        setEditBlank(g.inspStatnumEdit);
+        setEditBlank(g.inspAngEdit);
     }
 
     g.inspectorUpdating = false;
@@ -5839,6 +7823,41 @@ static void applyInspectorEdits(bool useCurrentTile)
         }
     }
 
+
+    const bool objectOk = selectedBuildObjectValid();
+    if (objectOk)
+    {
+        long typeValue = 0, hitagValue = 0, extraValue = 0;
+        if (!readEditLong(g.inspTypeEdit, isBloodMode() ? "Blood type" : "Object lotag", typeValue)) return;
+        if (!readEditLong(g.inspObjHitagEdit, isBloodMode() ? "Blood data/hitag" : "Object hitag", hitagValue)) return;
+        if (!readEditLong(g.inspExtraEdit, "Extra", extraValue)) return;
+        changed = setSelectedTypeDirect(static_cast<int>(typeValue)) || changed;
+        changed = setSelectedHitagDirect(static_cast<int>(hitagValue)) || changed;
+        changed = setSelectedExtraDirect(static_cast<int>(extraValue)) || changed;
+    }
+
+    if (surfaceOk)
+    {
+        long cstatValue = 0;
+        if (!readEditLong(g.inspCstatEdit, "Cstat/stat", cstatValue)) return;
+        changed = setSelectedCstatDirect(static_cast<int>(cstatValue)) || changed;
+    }
+
+    if (spriteOk)
+    {
+        long statValue = 0, angValue = 0;
+        if (!readEditLong(g.inspStatnumEdit, "Sprite statnum", statValue)) return;
+        if (!readEditLong(g.inspAngEdit, "Sprite angle", angValue)) return;
+        changed = setSelectedSpriteStatnumDirect(static_cast<int>(statValue)) || changed;
+        changed = setSelectedSpriteAngleDirect(static_cast<int>(angValue)) || changed;
+        if (isBloodMode())
+        {
+            const BloodSpriteDefault* def = bloodSpriteDefaultByTypeOrPic(sprite[g.sel.wall].lotag, sprite[g.sel.wall].picnum);
+            if (def)
+                changed = bloodApplySpriteDefault(g.sel.wall, *def, def->picnum >= 0) || changed;
+        }
+    }
+
     if (changed)
     {
         setDirty();
@@ -5868,6 +7887,9 @@ static void layoutInspectorControls(HWND hwnd)
     const int editGap = 8;
     const int editX = contentX + labelW + editGap;
     const int editW = max(56, cardX + cardW - cardPadX - editX);
+    const int halfGap = 8;
+    const int halfW = max(44, (editW - halfGap) / 2);
+    const int halfX2 = editX + halfW + halfGap;
     const int rowH = 23;
     int y = 10;
 
@@ -5880,6 +7902,12 @@ static void layoutInspectorControls(HWND hwnd)
     HWND labelX = GetDlgItem(hwnd, 1209);
     HWND labelY = GetDlgItem(hwnd, 1210);
     HWND labelZ = GetDlgItem(hwnd, 1211);
+    HWND labelType = GetDlgItem(hwnd, 1213);
+    HWND labelObjHitag = GetDlgItem(hwnd, 1214);
+    HWND labelExtra = GetDlgItem(hwnd, 1215);
+    HWND labelCstat = GetDlgItem(hwnd, 1216);
+    HWND labelStatnum = GetDlgItem(hwnd, 1217);
+    HWND labelAngle = GetDlgItem(hwnd, 1218);
 
     const int selectionH = 70;
     moveCtl(g.inspSelectionGroup, contentX, y + 6, contentW, 18);
@@ -5920,7 +7948,27 @@ static void layoutInspectorControls(HWND hwnd)
     moveCtl(g.inspLotagEdit, editX, rowY, editW, rowH); rowY += 31;
     moveCtl(labelHitag, contentX, rowY + 4, labelW, 18);
     moveCtl(g.inspHitagEdit, editX, rowY, editW, rowH);
-    y += sectorH + 14;
+    y += sectorH + 10;
+
+    const int bloodH = 278;
+    moveCtl(g.inspBloodGroup, contentX, y + 6, contentW, 18);
+    moveCtl(g.inspBloodTitle, contentX, y + headerH + 8, contentW, 34);
+    rowY = y + headerH + 48;
+    moveCtl(labelType, contentX, rowY + 4, labelW, 18);
+    moveCtl(g.inspTypeEdit, editX, rowY, editW, rowH); rowY += 31;
+    moveCtl(labelObjHitag, contentX, rowY + 4, labelW, 18);
+    moveCtl(g.inspObjHitagEdit, editX, rowY, editW, rowH); rowY += 31;
+    moveCtl(labelExtra, contentX, rowY + 4, labelW, 18);
+    moveCtl(g.inspExtraEdit, editX, rowY, editW, rowH); rowY += 31;
+    moveCtl(labelCstat, contentX, rowY + 4, labelW, 18);
+    moveCtl(g.inspCstatEdit, editX, rowY, editW, rowH); rowY += 31;
+    moveCtl(labelStatnum, contentX, rowY + 4, labelW, 18);
+    moveCtl(g.inspStatnumEdit, editX, rowY, halfW, rowH);
+    moveCtl(labelAngle, halfX2, rowY + 4, labelW, 18);
+    moveCtl(g.inspAngEdit, halfX2 + labelW, rowY, max(40, cardX + cardW - cardPadX - (halfX2 + labelW)), rowH); rowY += 34;
+    moveCtl(g.inspBloodPresetButton, contentX, rowY, contentW, 25); rowY += 31;
+    moveCtl(g.inspBloodFixupButton, contentX, rowY, contentW, 25);
+    y += bloodH + 14;
 
     const int buttonW = max(92, (W - 3 * m) / 2);
     moveCtl(g.inspApplyButton, m, y, buttonW, 30);
@@ -5951,8 +7999,8 @@ static void drawInspectorChrome(HWND hwnd, HDC hdc)
     const int cardW = max(1, W - 2 * m);
     int y = 10;
 
-    const int heights[] = { 70, 190, 140, 166 };
-    for (int i = 0; i < 4; ++i)
+    const int heights[] = { 70, 190, 140, 166, 278 };
+    for (int i = 0; i < 5; ++i)
     {
         RECT card{ cardX, y, cardX + cardW, y + heights[i] };
         drawInspectorCard(hdc, card);
@@ -5996,6 +8044,23 @@ static LRESULT CALLBACK InspectorProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         makeInspectorControl(hwnd, "STATIC", "Hitag", SS_LEFT, 0, 1206);
         g.inspHitagEdit = makeInspectorControl(hwnd, "EDIT", "", ES_AUTOHSCROLL, WS_EX_CLIENTEDGE, ids::ID_INSP_HITAG_EDIT);
 
+        g.inspBloodGroup = makeInspectorControl(hwnd, "STATIC", "Blood / Extended Tags", SS_LEFT, 0, 1194, true);
+        g.inspBloodTitle = makeInspectorControl(hwnd, "STATIC", "No selected Blood object", SS_LEFT, 0, 1212);
+        makeInspectorControl(hwnd, "STATIC", "Type", SS_LEFT, 0, 1213);
+        g.inspTypeEdit = makeInspectorControl(hwnd, "EDIT", "", ES_AUTOHSCROLL, WS_EX_CLIENTEDGE, ids::ID_INSP_TYPE_EDIT);
+        makeInspectorControl(hwnd, "STATIC", "Data", SS_LEFT, 0, 1214);
+        g.inspObjHitagEdit = makeInspectorControl(hwnd, "EDIT", "", ES_AUTOHSCROLL, WS_EX_CLIENTEDGE, ids::ID_INSP_OBJ_HITAG_EDIT);
+        makeInspectorControl(hwnd, "STATIC", "Extra", SS_LEFT, 0, 1215);
+        g.inspExtraEdit = makeInspectorControl(hwnd, "EDIT", "", ES_AUTOHSCROLL, WS_EX_CLIENTEDGE, ids::ID_INSP_EXTRA_EDIT);
+        makeInspectorControl(hwnd, "STATIC", "Cstat", SS_LEFT, 0, 1216);
+        g.inspCstatEdit = makeInspectorControl(hwnd, "EDIT", "", ES_AUTOHSCROLL, WS_EX_CLIENTEDGE, ids::ID_INSP_CSTAT_EDIT);
+        makeInspectorControl(hwnd, "STATIC", "Statnum", SS_LEFT, 0, 1217);
+        g.inspStatnumEdit = makeInspectorControl(hwnd, "EDIT", "", ES_AUTOHSCROLL, WS_EX_CLIENTEDGE, ids::ID_INSP_STATNUM_EDIT);
+        makeInspectorControl(hwnd, "STATIC", "Angle", SS_LEFT, 0, 1218);
+        g.inspAngEdit = makeInspectorControl(hwnd, "EDIT", "", ES_AUTOHSCROLL, WS_EX_CLIENTEDGE, ids::ID_INSP_ANG_EDIT);
+        g.inspBloodPresetButton = makeInspectorControl(hwnd, "BUTTON", "Blood sprite preset...", BS_PUSHBUTTON, 0, ids::ID_INSP_BLOOD_PRESET);
+        g.inspBloodFixupButton = makeInspectorControl(hwnd, "BUTTON", "Normalize Blood tags", BS_PUSHBUTTON, 0, ids::ID_INSP_BLOOD_FIXUP);
+
         g.inspApplyButton = makeInspectorControl(hwnd, "BUTTON", "Apply changes", BS_DEFPUSHBUTTON, 0, ids::ID_INSP_APPLY);
         g.inspRefreshButton = makeInspectorControl(hwnd, "BUTTON", "Revert", BS_PUSHBUTTON, 0, ids::ID_INSP_REFRESH);
         layoutInspectorControls(hwnd);
@@ -6017,6 +8082,12 @@ static LRESULT CALLBACK InspectorProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         case ids::ID_INSP_REFRESH:
             updateInspector();
             return 0;
+        case ids::ID_INSP_BLOOD_PRESET:
+            bloodChooseAndApplyPresetToSelectedSprite();
+            return 0;
+        case ids::ID_INSP_BLOOD_FIXUP:
+            bloodNormalizeSelectedObject();
+            return 0;
         }
         break;
     case WM_PAINT:
@@ -6033,7 +8104,7 @@ static LRESULT CALLBACK InspectorProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         HWND child = reinterpret_cast<HWND>(lp);
         const int id = GetDlgCtrlID(child);
         SetBkMode(hdc, TRANSPARENT);
-        if (id >= 1190 && id <= 1193)
+        if (id >= 1190 && id <= 1194)
         {
             SetTextColor(hdc, theme::Text);
             return reinterpret_cast<LRESULT>(themeHeaderBrush());
@@ -6043,7 +8114,7 @@ static LRESULT CALLBACK InspectorProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             SetTextColor(hdc, theme::Text);
             return reinterpret_cast<LRESULT>(themeCardBrush());
         }
-        if (id == 1207 || id == 1208)
+        if (id == 1207 || id == 1208 || id == 1212)
         {
             SetTextColor(hdc, theme::MutedText);
             return reinterpret_cast<LRESULT>(themeCardBrush());
@@ -6145,15 +8216,19 @@ static void showKeyboardHelp()
         "  W/A/S/D: move, arrows: look/turn, Space/C or PgUp/PgDn: fly up/down\n"
         "  Right drag: turn/look, left click: select wall/floor/sprite\n"
         "  Camera movement only runs while the 3D editor has focus\n"
-        "  F2/F3/F4/F6: 2D, 3D, Tile Art, GRP Edit tabs; F5: run map in Duke3DX\n"
+        "  F2/F3/F4/F6: 2D, 3D, Tile Art, Archive Edit tabs; F5: run map\n"
         "\nEditing:\n"
         "  Texture bar click: select tile, header button: expand/shrink browser\n"
         "  Tile Art tab: import/export PNG tiles and save TILES###.ART beside DUKE3D.GRP\n"
-        "  GRP Edit tab: multi-select entries, extract selected/all, or import files into a GRP\n"
+        "  Archive Edit tab: browse GRP/RFF, extract selected/all; import is GRP-only\n"
         "  Sprite selection: click a sprite, then edit X/Y/Z in the inspector\n"
         "  V/Ctrl-click: apply tile, Tab: copy properties, Enter: paste properties\n"
         "  B/1/M/T/P: blocking, one-way, masked, translucent, parallax\n"
-        "  +/-: shade, PgUp/PgDn: adjust selected Z where applicable";
+        "  +/-: shade, PgUp/PgDn: adjust selected Z where applicable\n"
+        "\nBlood mode:\n"
+        "  Startup selector chooses Duke Nukem 3D or Blood; Shadow Warrior is greyed out for now\n"
+        "  Blood inspector card edits selected object type/extra/cstat/statnum/angle\n"
+        "  Blood sprite insertion opens the Blood preset list and applies statnum/pic/repeat/pal defaults";
     MessageBoxA(g.main, msg, "Keyboard help", MB_ICONINFORMATION);
 }
 
@@ -6173,6 +8248,31 @@ static bool mountGroupIfExists(const char* name)
 
 static void loadBuildAssets()
 {
+    if (isBloodMode())
+    {
+        if (fileExistsA("BLOOD.RFF")) g.bloodDataPath = fullPathOf("BLOOD.RFF");
+        else if (fileExistsA("blood.rff")) g.bloodDataPath = fullPathOf("blood.rff");
+        if (!g.bloodDataPath.empty()) g.dukeGrpPath = g.bloodDataPath;
+        else if (fileExistsA("TILES000.ART")) g.dukeGrpPath = fullPathOf("TILES000.ART");
+        else if (fileExistsA("tiles000.art")) g.dukeGrpPath = fullPathOf("tiles000.art");
+
+        if (!g.bloodDataPath.empty() && isRffArchivePath(g.bloodDataPath.c_str()))
+        {
+            g.bloodRffPath = g.bloodDataPath;
+            g.grpEditPath = g.bloodDataPath;
+            prepareBloodRffCache(g.bloodRffPath);
+        }
+
+        initengine();
+        inittimerhandler();
+        reloadCurrentGamePalette();
+        if (!loadBloodArtSetFromCurrentData())
+            setStatus("Blood mode ready, but no Blood ART set was found. Choose BLOOD.RFF or TILES000.ART from the Tile Art tab.");
+        else
+            setStatus("Blood mode ready. RFF archive support is enabled; Shadow Warrior is disabled for now.");
+        return;
+    }
+
     mountGroupIfExists("duke3d.grp");
     mountGroupIfExists("DUKE3D.GRP");
     initengine();
@@ -6236,6 +8336,49 @@ static bool findDuke3DX(std::string& exePath)
     return true;
 }
 
+
+static bool findBloodRunner(std::string& exePath)
+{
+    std::vector<std::string> dirs;
+    if (!g.bloodDataPath.empty()) dirs.push_back(pathDirectory(g.bloodDataPath));
+    if (!g.dukeGrpPath.empty()) dirs.push_back(pathDirectory(g.dukeGrpPath));
+    if (!g.boardPath.empty() && g.boardPath.find('(') == std::string::npos) dirs.push_back(pathDirectory(g.boardPath));
+    dirs.push_back(moduleDirectory());
+    dirs.push_back(".");
+
+    const char* names[] = { "NBlood.exe", "nblood.exe", "BLOOD.EXE", "blood.exe" };
+    for (size_t d = 0; d < dirs.size(); ++d)
+    {
+        for (size_t n = 0; n < sizeof(names) / sizeof(names[0]); ++n)
+        {
+            const std::string candidate = pathJoin(dirs[d], names[n]);
+            if (fileExistsA(candidate.c_str()))
+            {
+                exePath = fullPathOf(candidate.c_str());
+                return true;
+            }
+        }
+    }
+
+    char file[MAX_PATH] = "";
+    OPENFILENAMEA ofn{};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = g.main;
+    ofn.lpstrFilter = "Blood executable (NBlood.exe; BLOOD.EXE)\0NBlood.exe;BLOOD.EXE;nblood.exe;blood.exe\0Executables (*.exe)\0*.exe\0All files (*.*)\0*.*\0";
+    ofn.lpstrFile = file;
+    ofn.nMaxFile = sizeof(file);
+    ofn.Flags = OFN_FILEMUSTEXIST | OFN_HIDEREADONLY;
+    ofn.lpstrDefExt = "exe";
+    if (!GetOpenFileNameA(&ofn)) return false;
+    exePath = fullPathOf(file);
+    return true;
+}
+
+static bool findGameRunner(std::string& exePath)
+{
+    return isBloodMode() ? findBloodRunner(exePath) : findDuke3DX(exePath);
+}
+
 static bool saveBeforeRunIfNeeded()
 {
     if (!g.dirty && !g.artDirty) return true;
@@ -6252,7 +8395,7 @@ static bool saveBeforeRunIfNeeded()
     bool ok = true;
     if (g.dirty)
     {
-        if (g.boardFromGrp || g.boardPath.empty() || g.boardPath == "newboard.map")
+        if (g.boardFromGrp || g.boardPath.empty() || g.boardPath == "newboard.map" || g.boardPath == "newblood.map")
             ok = promptSaveMap();
         else
             ok = saveMapFile(g.boardPath.c_str());
@@ -6269,7 +8412,7 @@ static bool buildRunMapPath(std::string& mapPath)
 {
     mapPath.clear();
 
-    if (!g.boardFromGrp && !g.boardPath.empty() && g.boardPath != "newboard.map")
+    if (!g.boardFromGrp && !g.boardPath.empty() && g.boardPath != "newboard.map" && g.boardPath != "newblood.map")
     {
         if (g.dirty)
         {
@@ -6287,7 +8430,7 @@ static bool buildRunMapPath(std::string& mapPath)
 
     std::string name;
     if (g.boardFromGrp && !g.boardGrpEntry.empty()) name = g.boardGrpEntry;
-    else if (!g.boardPath.empty() && g.boardPath != "newboard.map") name = pathBaseNameString(g.boardPath);
+    else if (!g.boardPath.empty() && g.boardPath != "newboard.map" && g.boardPath != "newblood.map") name = pathBaseNameString(g.boardPath);
     else name = "BuildXRun.map";
 
     name = sanitizeFileName(forceMapExtension(name));
@@ -6308,10 +8451,12 @@ static void runCurrentMap()
     if (!buildRunMapPath(mapPath)) return;
 
     std::string exePath;
-    if (!findDuke3DX(exePath)) return;
+    if (!findGameRunner(exePath)) return;
 
     const std::string workDir = pathDirectory(exePath);
-    std::string commandLine = "\"" + exePath + "\" /map \"" + mapPath + "\"";
+    std::string commandLine = "\"" + exePath + "\" ";
+    commandLine += isBloodMode() ? "-map \"" : "/map \"";
+    commandLine += mapPath + "\"";
 
     STARTUPINFOA si{};
     si.cb = sizeof(si);
@@ -6323,13 +8468,13 @@ static void runCurrentMap()
         workDir.empty() ? nullptr : workDir.c_str(), &si, &pi);
     if (!ok)
     {
-        MessageBoxA(g.main, "Could not launch Duke3DX.exe.", "Run map", MB_ICONERROR);
+        MessageBoxA(g.main, isBloodMode() ? "Could not launch the selected Blood executable." : "Could not launch Duke3DX.exe.", "Run map", MB_ICONERROR);
         return;
     }
 
     CloseHandle(pi.hThread);
     CloseHandle(pi.hProcess);
-    setStatus("Launched Duke3DX.exe /map %s", pathBaseNameString(mapPath).c_str());
+    setStatus("Launched %s with %s", pathBaseNameString(exePath).c_str(), pathBaseNameString(mapPath).c_str());
 }
 
 
@@ -6340,7 +8485,7 @@ static void handleCommand(HWND hwnd, int id)
     case ids::M_FILE_NEW:
         if (!confirmDiscardChanges()) break;
         initNewMap();
-        g.boardPath = "newboard.map";
+        g.boardPath = isBloodMode() ? "newblood.map" : "newboard.map";
         g.boardFromGrp = false;
         g.boardGrpPath.clear();
         g.boardGrpEntry.clear();
@@ -6359,7 +8504,7 @@ static void handleCommand(HWND hwnd, int id)
         bool ok = true;
         if (g.dirty)
         {
-            if (g.boardFromGrp || g.boardPath.empty() || g.boardPath == "newboard.map") ok = promptSaveMap();
+            if (g.boardFromGrp || g.boardPath.empty() || g.boardPath == "newboard.map" || g.boardPath == "newblood.map") ok = promptSaveMap();
             else ok = saveMapFile(g.boardPath.c_str());
         }
         if (ok && g.artDirty) saveModifiedArtFiles();
@@ -6437,6 +8582,12 @@ static void handleCommand(HWND hwnd, int id)
         zAdjustSelection(-1024); break;
     case ids::M_TOOLS_Z_DOWN:
         zAdjustSelection(+1024); break;
+    case ids::M_BLOOD_SPRITE_PRESET:
+        bloodChooseAndApplyPresetToSelectedSprite(); break;
+    case ids::M_BLOOD_FIXUP_SELECTION:
+        bloodNormalizeSelectedObject(); break;
+    case ids::M_BLOOD_FIXUP_MAP:
+        bloodNormalizeMapForBlood(false); break;
     case ids::M_TEXTURE_GOTO:
         gotoTileDialog(); break;
     case ids::M_TEXTURE_TOGGLE_SIZE:
@@ -6664,7 +8815,7 @@ static LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         TabCtrl_InsertItem(g.tab, 1, &item);
         item.pszText = const_cast<char*>("Tile Art");
         TabCtrl_InsertItem(g.tab, 2, &item);
-        item.pszText = const_cast<char*>("GRP Edit");
+        item.pszText = const_cast<char*>("Archive Edit");
         TabCtrl_InsertItem(g.tab, 3, &item);
         subclassDarkTabControl(g.tab);
 
@@ -6835,6 +8986,16 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR lpCmdLine, int nCmdShow)
         g.gdiplusToken = 0;
 
     registerWindowClasses(hInst);
+    if (!showGameSelectScreen())
+    {
+        if (g.gdiplusToken)
+        {
+            Gdiplus::GdiplusShutdown(g.gdiplusToken);
+            g.gdiplusToken = 0;
+        }
+        releaseThemeBrushes();
+        return 0;
+    }
     loadBuildAssets();
 
     int argc = 0;
@@ -6850,7 +9011,11 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR lpCmdLine, int nCmdShow)
 
     bool initialLoaded = false;
     if (!initialMap.empty()) initialLoaded = loadMapFile(initialMap.c_str());
-    else initNewMap();
+    else
+    {
+        initNewMap();
+        if (isBloodMode()) g.boardPath = "newblood.map";
+    }
 
     HWND hwnd = CreateWindowExA(0, "BuildWin32EditorMain", "BuildX",
         WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN | WS_CLIPSIBLINGS,

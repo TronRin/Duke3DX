@@ -232,6 +232,7 @@ extern "C" {
     int changespritestat(short spritenum, short newstatnum);
     int setsprite(short spritenum, long newx, long newy, long newz);
     int inside(long x, long y, short sectnum);
+    void FlushTextureCache();
     void updatesector(long x, long y, short* sectnum);
     long getceilzofslope(short sectnum, long dax, long day);
     long getflorzofslope(short sectnum, long dax, long day);

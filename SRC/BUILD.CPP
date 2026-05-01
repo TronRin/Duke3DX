@@ -6501,6 +6501,11 @@ extern "C" void setbrightness(char dabrightness, unsigned char* dapal)
     buildgl::purgeTextureCache();
 }
 
+extern "C" void FlushTextureCache()
+{
+    buildgl::purgeTextureCache();
+}
+
 extern "C" long getpalookup(long davis, long dashade)
 {
     return min(max(dashade + (davis >> 8), 0L), numpalookups - 1);
